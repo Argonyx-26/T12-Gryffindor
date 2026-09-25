@@ -11,7 +11,7 @@ import { ShieldAlert, Clock, Radio, Activity, Terminal } from 'lucide-react';
  * 2. Live digital clock that ticks every second via a React useEffect timer
  * 3. System status telemetry indicators (DEFCON level, encryption status, active feed)
  */
-export default function Header({ isConnected = false }) {
+export default function Header({ isConnected = false, threatPosture = 'DEFCON 4 // NOMINAL' }) {
   // Store the current time in React state so the UI automatically re-renders every second
   const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -88,10 +88,20 @@ export default function Header({ isConnected = false }) {
           
           {/* Tactical DEFCON / Threat Status indicator */}
           <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded bg-slate-950/70 border border-slate-800">
-            <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+            <Radio className={`w-3.5 h-3.5 animate-pulse ${
+              threatPosture.includes('CRITICAL') ? 'text-red-400' :
+              threatPosture.includes('ELEVATED') ? 'text-amber-400' :
+              'text-emerald-400'
+            }`} />
             <div className="text-left font-mono">
               <span className="text-[10px] text-slate-500 block leading-none">THREAT POSTURE</span>
-              <span className="text-xs font-bold text-amber-400 leading-none">DEFCON 2 // ELEVATED</span>
+              <span className={`text-xs font-bold leading-none ${
+                threatPosture.includes('CRITICAL') ? 'text-red-400' :
+                threatPosture.includes('ELEVATED') ? 'text-amber-400' :
+                'text-emerald-400'
+              }`}>
+                {threatPosture}
+              </span>
             </div>
           </div>
 
