@@ -184,6 +184,36 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
   const isAcknowledged = status === 'ACKNOWLEDGED';
   const isResolved = status === 'RESOLVED';
 
+  // Dynamic description logic:
+  // If 1 source: "Single-source detection: [source]"
+  // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
+  const getDisplayDescription = () => {
+    let sourcesList = Array.isArray(alert.sources)
+      ? alert.sources
+      : (alert.source_type ? [alert.source_type] : []);
+
+    let desc = alert.description;
+    if (sourcesList.length === 0 && typeof desc === 'string') {
+      const match = desc.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      return `Single-source detection: ${sourcesList[0]}`;
+    }
+    if (sourcesList.length >= 2) {
+      return `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    }
+    if (desc && (desc.startsWith('Corroborated multimodal detection across:') || desc.startsWith('Corroborated multi-vector detection across:'))) {
+      return 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+    return desc || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+  };
+
+  const displayDescription = getDisplayDescription();
+
   return (
     <div
       onClick={() => onSelect(alert)}
@@ -238,9 +268,9 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           <h3 className="text-base font-semibold text-slate-100 group-hover:text-red-400 transition-colors truncate">
             {zone_id}
           </h3>
-          {alert.description && (
+          {displayDescription && (
             <p className="text-xs text-slate-400 mt-1 line-clamp-1 font-sans">
-              {alert.description}
+              {displayDescription}
             </p>
           )}
         </div>

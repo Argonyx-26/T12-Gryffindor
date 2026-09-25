@@ -5,7 +5,7 @@ import { ShieldAlert, Clock, Radio, Activity, Terminal } from 'lucide-react';
  * Header Component
  * 
  * Purpose:
- * Renders the top tactical command banner for "GRYFFINDOR SENTINEL".
+ * Renders the top tactical command banner for "GRYFFINDOR".
  * Includes:
  * 1. Title with tactical iconography
  * 2. Live digital clock that ticks every second via a React useEffect timer

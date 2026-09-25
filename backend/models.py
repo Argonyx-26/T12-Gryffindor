@@ -188,6 +188,10 @@ class Incident(BaseModel):
         default=None,
         description="ISO-8601 timestamp when incident was resolved",
     )
+    description: Optional[str] = Field(
+        default=None,
+        description="Operational synopsis or tactical detection summary",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
