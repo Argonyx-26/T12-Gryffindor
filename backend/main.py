@@ -200,7 +200,7 @@ def get_zones():
 
 
 @app.post("/events", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
- @app.post("/ingest", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
+@app.post("/ingest", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
 async def ingest_event(event: Event):
     """
     Ingest a real-time event from CCTV, IoT, or Cyber sources.
