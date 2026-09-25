@@ -57,11 +57,12 @@ export function useAlertSocket(customUrl) {
   // Connection state: 'connected' | 'reconnecting' | 'disconnected'
   const [connectionStatus, setConnectionStatus] = useState('reconnecting');
 
-  // Stable references for WebSocket instance and reconnect timer
+  // Stable references for WebSocket instance, reconnect timer, and dismissed alerts
   const socketRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
   const connectRef = useRef(null);
+  const dismissedIdsRef = useRef(new Set());
 
   /**
    * Helper function to normalize alert fields so they map cleanly to the UI,
@@ -116,18 +117,32 @@ export function useAlertSocket(customUrl) {
       ];
     }
 
-    // Compute distinct source modalities across all contributing events / sources
-    let distinctSources = [];
+    // Dynamic detection description wording based on number of sources
+    let sourcesList = [];
     if (Array.isArray(data.sources) && data.sources.length > 0) {
-      distinctSources = Array.from(new Set(data.sources.filter(Boolean)));
+      sourcesList = Array.from(new Set(data.sources.filter(Boolean)));
     } else if (Array.isArray(data.events) && data.events.length > 0) {
-      distinctSources = Array.from(new Set(data.events.map(e => e.source_type || e.source).filter(Boolean)));
+      sourcesList = Array.from(new Set(data.events.map(e => e.source_type || e.source).filter(Boolean)));
     } else if (data.source_type) {
-      distinctSources = [data.source_type];
+      sourcesList = [data.source_type];
     }
 
-    // Recalculate label: count DISTINCT source_types across all merged/contributing events
-    const description = calculateSynopsis(distinctSources, data.description);
+    let description = data.description;
+    // Fallback extraction if sources array not provided but legacy description string is present
+    if (sourcesList.length === 0 && typeof description === 'string') {
+      const match = description.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map(s => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      description = `Single-source detection: ${sourcesList[0]}`;
+    } else if (sourcesList.length >= 2) {
+      description = `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    } else if (!description || description.startsWith('Corroborated multimodal detection across:') || description.startsWith('Corroborated multi-vector detection across:')) {
+      description = 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
 
     return {
       ...data, // Preserve any additional backend fields
@@ -137,7 +152,7 @@ export function useAlertSocket(customUrl) {
       severity,
       timestamp: formattedTimestamp,
       status: data.status || 'open',
-      sources: distinctSources.length > 0 ? distinctSources : (data.sources || []),
+      sources: sourcesList,
       description,
       camera_id: data.camera_id || (data.zone_id ? `CAM-${String(data.zone_id).replace(/\s+/g, '-').slice(0, 10).toUpperCase()}` : 'CAM-PRIMARY'),
       correlated_events,
@@ -185,7 +200,15 @@ export function useAlertSocket(customUrl) {
 
           // Handle both batch array of alerts or single alert object
           if (Array.isArray(rawData)) {
-            const normalizedBatch = rawData.map(normalizeAlert).filter(Boolean);
+            if (rawData.length === 0) {
+              setAlerts([]);
+              return;
+            }
+            const normalizedBatch = rawData
+              .map(normalizeAlert)
+              .filter(Boolean)
+              .filter((a) => !dismissedIdsRef.current.has(a.incident_id));
+
             setAlerts((prevAlerts) => {
               const updated = [...prevAlerts];
               const freshAlerts = [];
@@ -231,6 +254,8 @@ export function useAlertSocket(customUrl) {
           } else if (rawData && typeof rawData === 'object') {
             const normalized = normalizeAlert(rawData);
             if (normalized) {
+              // A new incoming alert should always be displayed even if old batch was cleared
+              dismissedIdsRef.current.delete(normalized.incident_id);
               setAlerts((prevAlerts) => {
                 // If this alert already exists (e.g., de-duplication update or status change broadcasted), update it
                 const existingIndex = prevAlerts.findIndex(a => a.incident_id === normalized.incident_id);
@@ -349,9 +374,40 @@ export function useAlertSocket(customUrl) {
     );
   }, []);
 
+  /**
+   * Clear all active alerts from local feed and request backend purge
+   */
+  const clearAlerts = useCallback(async () => {
+    setAlerts((currentAlerts) => {
+      currentAlerts.forEach((a) => {
+        if (a && a.incident_id) {
+          dismissedIdsRef.current.add(a.incident_id);
+        }
+      });
+      return [];
+    });
+
+    try {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      await fetch(`${apiUrl}/incidents`, { method: 'DELETE' });
+    } catch {
+      // Backend may not support DELETE /incidents yet
+    }
+  }, []);
+
+  /**
+   * Restore all previously dismissed alerts
+   */
+  const restoreAlerts = useCallback(() => {
+    dismissedIdsRef.current.clear();
+    connect();
+  }, [connect]);
+
   return {
     alerts,
     setAlerts,
+    clearAlerts,
+    restoreAlerts,
     connectionStatus,
     isConnected: connectionStatus === 'connected',
     isReconnecting: connectionStatus === 'reconnecting',

@@ -1,6 +1,6 @@
 import React from 'react';
 import AlertCard from './AlertCard';
-import { Flame, RefreshCw, Wifi, WifiOff, ShieldCheck } from 'lucide-react';
+import { Flame, RefreshCw, Radio, Wifi, WifiOff, ShieldCheck, Trash2 } from 'lucide-react';
 
 /**
  * LiveAlertFeed Component
@@ -13,6 +13,7 @@ import { Flame, RefreshCw, Wifi, WifiOff, ShieldCheck } from 'lucide-react';
  * - selectedAlertId: Currently inspected incident_id (for card border highlight)
  * - onSelectAlert: Function to handle selecting an alert to display in Evidence Drawer
  * - onUpdateStatus: Function to update an incident status locally (Dispatch / False Positive)
+ * - onClearAlerts: Function to purge/dismiss active alerts and reset feed to nominal
  * - connectionStatus: 'connected' | 'reconnecting' | 'disconnected'
  * - isConnected: Boolean indicating live WebSocket connection
  */
@@ -21,6 +22,7 @@ export default function LiveAlertFeed({
   selectedAlertId,
   onSelectAlert,
   onUpdateStatus,
+  onClearAlerts,
   connectionStatus = 'reconnecting',
   isConnected = false,
 }) {
@@ -45,8 +47,21 @@ export default function LiveAlertFeed({
           </span>
         </div>
 
-        {/* Live Reconnection & Connection Status Indicator */}
+        {/* Action Controls & Live Status Indicator */}
         <div className="flex items-center gap-2">
+          {/* Quick Clear Feed Action */}
+          {alerts.length > 0 && onClearAlerts && (
+            <button
+              type="button"
+              onClick={onClearAlerts}
+              title="Clear active feed and reset dashboard to nominal standby"
+              className="px-2.5 py-1 rounded bg-slate-900/90 hover:bg-red-950/80 text-slate-400 hover:text-red-400 border border-slate-800 hover:border-red-500/40 text-xs font-mono flex items-center gap-1.5 transition-all active:scale-95 shadow-sm"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Clear Feed</span>
+            </button>
+          )}
+
           {isConnected ? (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-400 font-mono text-xs shadow-[0_0_10px_rgba(16,185,129,0.2)]">
               <span className="relative flex h-2 w-2">
