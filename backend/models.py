@@ -150,10 +150,13 @@ class Incident(BaseModel):
         default="open",
         description="Operational incident status: DETECTED, CORRELATED, SCORED, open, dispatched, ACKNOWLEDGED, RESOLVED, true_positive, false_positive",
     )
+<<<<<<< HEAD
     trace_id: Optional[str] = Field(
         default=None,
         description="End-to-end distributed trace identifier",
     )
+=======
+>>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     explanation: str = Field(
         default="",
         description="Human-readable explanation of why this incident triggered",
@@ -191,6 +194,13 @@ class Incident(BaseModel):
     resolved_ts: Optional[str] = Field(
         default=None,
         description="ISO-8601 timestamp when incident was resolved",
+<<<<<<< HEAD
+=======
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Operational synopsis or tactical detection summary",
+>>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     )
 
     model_config = ConfigDict(

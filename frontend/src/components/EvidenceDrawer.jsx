@@ -1,5 +1,5 @@
 import React from 'react';
-import { Camera, ListFilter, ShieldAlert, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
+import { Camera, ListFilter, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
 
 /**
  * EvidenceDrawer Component
@@ -36,6 +36,36 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
   }
 
   const { incident_id, zone_id, score, severity, timestamp, description, camera_id, correlated_events } = selectedAlert;
+
+  // Dynamic description logic:
+  // If 1 source: "Single-source detection: [source]"
+  // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
+  const getDisplayDescription = () => {
+    let sourcesList = Array.isArray(selectedAlert.sources)
+      ? selectedAlert.sources
+      : (selectedAlert.source_type ? [selectedAlert.source_type] : []);
+
+    let desc = description;
+    if (sourcesList.length === 0 && typeof desc === 'string') {
+      const match = desc.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      return `Single-source detection: ${sourcesList[0]}`;
+    }
+    if (sourcesList.length >= 2) {
+      return `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    }
+    if (desc && (desc.startsWith('Corroborated multimodal detection across:') || desc.startsWith('Corroborated multi-vector detection across:'))) {
+      return 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+    return desc || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+  };
+
+  const displayDescription = getDisplayDescription();
 
   // Severity color indicator helper
   const getBadgeColor = (sev) => {
@@ -110,10 +140,53 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
           </div>
         </div>
 
-        {description && (
+        {displayDescription && (
           <div className="text-xs bg-slate-900/40 p-2.5 rounded border border-slate-800/60 text-slate-300 font-mono">
             <span className="text-slate-500 mr-2">[SYNOPSIS]</span>
-            {description}
+            {displayDescription}
+          </div>
+        )}
+
+        {/* Phase 2: Explainable AI & Score Breakdown */}
+        {selectedAlert.explanation && (
+          <div className="bg-slate-900/80 p-3.5 rounded-lg border border-slate-800 space-y-2 font-mono text-xs">
+            <div className="flex items-center gap-1.5 text-cyan-400 font-bold uppercase tracking-wider text-[11px]">
+              <ShieldAlert className="w-4 h-4 text-cyan-400" />
+              <span>EXPLAINABLE AI THREAT ANALYSIS</span>
+            </div>
+            <p className="text-slate-300 font-sans text-xs leading-relaxed">
+              {selectedAlert.explanation}
+            </p>
+            {selectedAlert.contributing_factors && selectedAlert.contributing_factors.length > 0 && (
+              <div className="mt-2 space-y-1">
+                <span className="text-[10px] text-slate-500 uppercase block font-mono">CONTRIBUTING RISK FACTORS:</span>
+                <ul className="list-disc list-inside text-amber-300/90 text-xs space-y-0.5 font-sans">
+                  {selectedAlert.contributing_factors.map((factor, fIdx) => (
+                    <li key={fIdx}>{factor}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {selectedAlert.score_breakdown && (
+              <div className="mt-3 pt-2 border-t border-slate-800 flex items-center gap-2 flex-wrap text-[10px] font-mono">
+                <span className="text-slate-500">MODALITY BREAKDOWN:</span>
+                {Object.entries(selectedAlert.score_breakdown.modality_contributions || {}).map(([mod, val]) => (
+                  <span key={mod} className="bg-slate-950 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
+                    {mod}: <strong className="text-red-400">{val}</strong>
+                  </span>
+                ))}
+                {selectedAlert.score_breakdown.corroboration_multiplier && (
+                  <span className="bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30 text-cyan-300">
+                    MULT: <strong>{selectedAlert.score_breakdown.corroboration_multiplier}x</strong>
+                  </span>
+                )}
+                {selectedAlert.score_breakdown.zone_weight && (
+                  <span className="bg-amber-950/60 px-2 py-0.5 rounded border border-amber-500/30 text-amber-300">
+                    ZONE: <strong>{selectedAlert.score_breakdown.zone_weight}</strong>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
