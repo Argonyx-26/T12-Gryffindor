@@ -85,10 +85,13 @@ def run_scoring_test():
     for idx, ev in enumerate(test_events, 1):
         latest_incident = engine.process_event(ev)
         print(f"\nStep {idx}: Received [{ev['source_type']}] (confidence: {ev['confidence']})")
-        print(f"  - Correlated Sources: {latest_incident.sources}")
-        print(f"  - Event IDs:          {latest_incident.event_ids}")
-        print(f"  - Incident Score:     {latest_incident.score} / 100")
-        print(f"  - Severity:           {latest_incident.severity}")
+        if latest_incident is not None:
+            print(f"  - Correlated Sources: {latest_incident.sources}")
+            print(f"  - Event IDs:          {latest_incident.event_ids}")
+            print(f"  - Incident Score:     {latest_incident.score} / 100")
+            print(f"  - Severity:           {latest_incident.severity}")
+        else:
+            print("  - [NOISE SUPPRESSION] Single-source below Medium threshold (suppressed from creating visible incident)")
 
     # 2. Detailed Mathematical Breakdown of the Final Incident
     print("\n" + "=" * 70)

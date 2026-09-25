@@ -442,8 +442,21 @@ class CorrelationEngine:
                 self.add_event(new_event_data)
                 return updated_incident
 
-        # 3. Genuinely new incident (5s passed since last closed, or 5s passed since open incident, or different zone)
-        new_incident = self.correlate(new_event_data)
+        # 3. Check if this candidate qualifies to create a new visible incident:
+        # EITHER (a) two or more distinct source_types corroborate within the correlation window,
+        # OR (b) a single source's score alone is above the "Medium" threshold from SEVERITY_THRESHOLDS.
+        candidate = self.correlate(new_event_data)
+        is_multi_source = len(candidate.sources) >= 2
+        is_above_medium = candidate.score >= SEVERITY_THRESHOLDS["Medium"]
+
+        if not (is_multi_source or is_above_medium):
+            # Single-source, low-confidence event (like one lone door sensor trigger or one lone failed login).
+            # Logged internally to event_store and added to rolling buffer, but does NOT create or broadcast an incident.
+            self.add_event(new_event_data)
+            return None
+
+        # Genuinely new incident (qualifies via (a) or (b))
+        new_incident = candidate
         self.active_incidents[zone_id] = new_incident
         self.last_incident_time[zone_id] = event_epoch
         self.last_closed_time.pop(zone_id, None)
@@ -780,6 +793,7 @@ def get_metrics():
         events_without_incident = max(0, total_events - total_incidents)
         noise_suppression_rate = round((events_without_incident / total_events) * 100.0, 2)
     else:
+        events_without_incident = 0
         noise_suppression_rate = 0.0
 
     if total_incidents > 0:
@@ -792,6 +806,7 @@ def get_metrics():
         "total_events_received": total_events,
         "total_incidents": total_incidents,
         "total_incidents_created": total_incidents,
+        "events_without_incident": events_without_incident,
         "noise_suppression_rate": noise_suppression_rate,
         "average_latency_ms": avg_latency,
         "avg_latency_ms": avg_latency,
