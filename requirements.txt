@@ -1,4 +1,9 @@
+<<<<<<< HEAD
 requests
 fastapi
 uvicorn
 pydantic
+=======
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+>>>>>>> 84e32a25419cab0c7e9ea20d31963c08513137df
