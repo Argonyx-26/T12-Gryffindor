@@ -49,3 +49,41 @@
     linear-gradient(to right, rgba(51, 65, 85, 0.15) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(51, 65, 85, 0.15) 1px, transparent 1px);
 }
+
+/* Pulsing / Glowing Red for Critical Alerts */
+@keyframes pulse-glow-red {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.35), inset 0 0 10px rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 32px rgba(239, 68, 68, 0.7), inset 0 0 16px rgba(239, 68, 68, 0.3);
+    border-color: rgba(248, 113, 113, 1);
+  }
+}
+
+.glow-critical {
+  animation: pulse-glow-red 2.2s ease-in-out infinite;
+}
+
+/* Smooth Entrance Fade-in / Slide-down Animation for Incoming Alerts */
+@keyframes alert-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(-24px) scale(0.97);
+    filter: brightness(1.5);
+  }
+  50% {
+    opacity: 0.9;
+    transform: translateY(3px) scale(1.01);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: brightness(1);
+  }
+}
+
+.animate-alert-enter {
+  animation: alert-enter 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+}

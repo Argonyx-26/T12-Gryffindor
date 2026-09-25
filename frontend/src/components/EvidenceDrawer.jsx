@@ -20,13 +20,15 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
   if (!selectedAlert) {
     return (
       <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-6 text-center text-slate-500 font-mono text-xs shadow-lg transition-all duration-300">
-        <div className="flex flex-col items-center justify-center gap-2">
-          <Eye className="w-8 h-8 text-slate-700 animate-pulse" />
-          <p className="font-semibold text-slate-400 uppercase tracking-wider">
-            Evidence Drawer Standby
+        <div className="flex flex-col items-center justify-center gap-2.5">
+          <div className="w-10 h-10 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
+            <Eye className="w-5 h-5 text-slate-400" />
+          </div>
+          <p className="font-semibold text-slate-300 uppercase tracking-wider text-xs">
+            Forensic Dossier Standby
           </p>
-          <p className="text-slate-500 text-[11px] max-w-xs">
-            Click on any alert card in the feed above to expand forensic evidence, camera snapshot, and correlated events.
+          <p className="text-slate-500 text-[11px] max-w-xs leading-relaxed font-sans">
+            Forensic evidence, surveillance snapshots, and multi-sensor correlations will load here automatically when an alert is selected.
           </p>
         </div>
       </div>
@@ -39,14 +41,14 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
   const getBadgeColor = (sev) => {
     switch (sev) {
       case 'Critical':
-        return 'text-red-400 bg-red-950/80 border-red-500/50';
+        return 'text-white bg-red-600 border-red-400 font-extrabold shadow-[0_0_12px_rgba(239,68,68,0.6)] animate-pulse';
       case 'High':
-        return 'text-amber-400 bg-amber-950/80 border-amber-500/50';
+        return 'text-slate-950 bg-amber-500 border-amber-300 font-extrabold shadow-sm';
       case 'Medium':
-        return 'text-yellow-400 bg-yellow-950/80 border-yellow-500/50';
+        return 'text-slate-950 bg-yellow-400 border-yellow-200 font-extrabold shadow-sm';
       case 'Low':
       default:
-        return 'text-emerald-400 bg-emerald-950/80 border-emerald-500/50';
+        return 'text-slate-950 bg-emerald-500 border-emerald-300 font-extrabold shadow-sm';
     }
   };
 
