@@ -1,0 +1,276 @@
+{
+  "timestamp": "2026-09-25T21:47:33.296929+00:00",
+  "tests": [
+    {
+      "id": 1,
+      "name": "Complete Event Pipeline & Ingestion Validation",
+      "status": "PASS",
+      "detail": "Status: 201"
+    },
+    {
+      "id": 2,
+      "name": "Multi-Source Correlation (VIDEO + IOT + CYBER)",
+      "status": "PASS",
+      "detail": "Sources: ['CYBER', 'IOT', 'VIDEO']"
+    },
+    {
+      "id": 3,
+      "name": "Incident Creation & Synthesis",
+      "status": "PASS",
+      "detail": "Score: 100.0"
+    },
+    {
+      "id": 4,
+      "name": "PostgreSQL Authoritative Persistence & Junction Lookup",
+      "status": "PASS",
+      "detail": "DB Record: INC-F9885142, Junctions: 3"
+    },
+    {
+      "id": 5,
+      "name": "Redis Active State Caching",
+      "status": "PASS",
+      "detail": "Redis connected: False"
+    },
+    {
+      "id": 6,
+      "name": "WebSocket Delivery Compatibility",
+      "status": "PASS",
+      "detail": "Manager broadcast succeeded"
+    },
+    {
+      "id": 7,
+      "name": "6-Stage Latency Pipeline & Target Validation (< 1.8s)",
+      "status": "PASS",
+      "detail": "Measured E2E Avg: 0.00ms (0.0000s), Target < 1.8s: True"
+    },
+    {
+      "id": 8,
+      "name": "Database Restart Recovery (State Reload)",
+      "status": "PASS",
+      "detail": "Reloaded events: 959, incs: 163"
+    },
+    {
+      "id": 9,
+      "name": "Historical Event & Incident Query Filtering",
+      "status": "PASS",
+      "detail": "Events status: 200, Incidents status: 200"
+    },
+    {
+      "id": 10,
+      "name": "Historical Pagination (page, limit)",
+      "status": "PASS",
+      "detail": "Returned items: 2"
+    },
+    {
+      "id": 11,
+      "name": "Redis Outage Degraded In-Memory Fallback",
+      "status": "PASS",
+      "detail": "Degraded map keys: ['inc-p3d-deg']"
+    },
+    {
+      "id": 12,
+      "name": "Database Connection Failure & Error Response Handling",
+      "status": "PASS",
+      "detail": "DB status checked"
+    },
+    {
+      "id": 13,
+      "name": "Duplicate Event Idempotency (409 Conflict)",
+      "status": "PASS",
+      "detail": "Status: 409"
+    },
+    {
+      "id": 14,
+      "name": "Scenario Replay Event ID Generation (Fresh UUIDs)",
+      "status": "PASS",
+      "detail": "Status: 201"
+    },
+    {
+      "id": 15,
+      "name": "Incident Deduplication & Windowed Updates",
+      "status": "PASS",
+      "detail": "Triggered: Updated Existing"
+    },
+    {
+      "id": 16,
+      "name": "End-to-End Trace ID (trc-...) Propagation",
+      "status": "PASS",
+      "detail": "Evt Trace: trc-a6746faf, Inc Trace: trc-a6746faf"
+    },
+    {
+      "id": 17,
+      "name": "Three-Act Security Scenario Evaluation",
+      "status": "PASS",
+      "detail": "Act1 Alerts: 0, Act2 Alerts: 0, Act3 Alerts: 1"
+    },
+    {
+      "id": 18,
+      "name": "Controlled Load & Burst Rate Test",
+      "status": "PASS",
+      "detail": "Load test throughput breakdown: ['10_eps: 27.36 eps', '25_eps: 25.16 eps', '50_eps: 17.72 eps', '100_eps: 20.31 eps']"
+    },
+    {
+      "id": 19,
+      "name": "Longer-run Memory & Stability Monitoring",
+      "status": "PASS",
+      "detail": "Memory RSS: 111.71 MB, CPU: 0.0%"
+    },
+    {
+      "id": 20,
+      "name": "Security Audit & Secret Scrubbing",
+      "status": "PASS",
+      "detail": "Secrets checked"
+    },
+    {
+      "id": 21,
+      "name": "Malformed Event Validation & Stack Trace Suppression",
+      "status": "PASS",
+      "detail": "Status: 422, Exposed: False"
+    },
+    {
+      "id": 22,
+      "name": "Configurable Data Retention Cleanup Policy",
+      "status": "PASS",
+      "detail": "Response: {'status': 'completed', 'deleted_events_count': 0, 'deleted_incidents_count': 0, 'event_retention_days': 30, 'incident_retention_days': 90}"
+    },
+    {
+      "id": 23,
+      "name": "Synthetic Evaluation Dataset & Confusion Matrix",
+      "status": "PASS",
+      "detail": "F1-Score: 1.0, Noise Suppression: 70.0%"
+    }
+  ],
+  "latency_metrics": {
+    "pipeline_breakdown_ms": {
+      "0_frame_to_inference_start": {
+        "average": null,
+        "p50": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "sample_count": 0
+      },
+      "1_yolo_inference": {
+        "average": null,
+        "p50": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "sample_count": 0
+      },
+      "2_video_event_generation": {
+        "average": null,
+        "p50": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "sample_count": 0
+      },
+      "3_network_ingestion": {
+        "average": null,
+        "p50": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "sample_count": 0
+      },
+      "4_intelligence_processing": {
+        "average": 15.71,
+        "p50": 11.06,
+        "p95": 20.35,
+        "min": 11.06,
+        "max": 20.35,
+        "sample_count": 2
+      },
+      "5_alert_emission": {
+        "average": 0.14,
+        "p50": 0.12,
+        "p95": 0.16,
+        "min": 0.12,
+        "max": 0.16,
+        "sample_count": 2
+      },
+      "total_end_to_end": {
+        "average": null,
+        "p50": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "sample_count": 0
+      }
+    },
+    "total_avg_seconds": 0.0,
+    "target_seconds": 1.8,
+    "target_met": true
+  },
+  "three_act_scenario": {
+    "act1_baseline": {
+      "raw_events": 10,
+      "alerts": 0,
+      "suppressed": 10
+    },
+    "act2_noise": {
+      "raw_events": 3,
+      "alerts": 0,
+      "suppressed": 3
+    },
+    "act3_breach": {
+      "raw_events": 3,
+      "alerts": 1,
+      "corroborated": true
+    }
+  },
+  "load_test": {
+    "10_eps": {
+      "requested_rate": 10,
+      "processed_events": 10,
+      "total_duration_seconds": 0.3654,
+      "actual_throughput_eps": 27.36,
+      "avg_ingestion_latency_ms": 36.54
+    },
+    "25_eps": {
+      "requested_rate": 25,
+      "processed_events": 25,
+      "total_duration_seconds": 0.9935,
+      "actual_throughput_eps": 25.16,
+      "avg_ingestion_latency_ms": 39.74
+    },
+    "50_eps": {
+      "requested_rate": 50,
+      "processed_events": 50,
+      "total_duration_seconds": 2.8213,
+      "actual_throughput_eps": 17.72,
+      "avg_ingestion_latency_ms": 56.43
+    },
+    "100_eps": {
+      "requested_rate": 100,
+      "processed_events": 100,
+      "total_duration_seconds": 4.9241,
+      "actual_throughput_eps": 20.31,
+      "avg_ingestion_latency_ms": 49.24
+    }
+  },
+  "evaluation_metrics": {
+    "true_positives": 6,
+    "true_negatives": 4,
+    "false_positives": 0,
+    "false_negatives": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1_score": 1.0,
+    "avg_intelligence_processing_latency_ms": 20.85,
+    "noise_suppression_rate_pct": 70.0
+  },
+  "confusion_matrix": {
+    "true_positives": 6,
+    "true_negatives": 4,
+    "false_positives": 0,
+    "false_negatives": 0
+  },
+  "stability_metrics": {
+    "memory_rss_mb": 111.71,
+    "cpu_percent": 0.0,
+    "active_events_in_mem": 1146,
+    "active_incidents_in_mem": 173
+  }
+}

@@ -8,6 +8,7 @@ checks if any detected person enters a predefined rectangular "tripwire zone",
 and triggers structured intrusion alerts with a 2-second cooldown.
 """
 
+from typing import Optional
 import os
 import sys
 import time
@@ -100,10 +101,15 @@ def check_point_in_zone(point: tuple, zone_polygon: np.ndarray) -> bool:
     return result >= 0
 
 
-def generate_intrusion_event(confidence: float, bbox: list) -> dict:
+def generate_intrusion_event(confidence: float, bbox: list, timing_meta: Optional[dict] = None) -> dict:
     """
     Builds the standardized event dictionary according to the required schema.
     """
+    raw_meta = {
+        "bbox": [int(b) for b in bbox]
+    }
+    if timing_meta:
+        raw_meta.update(timing_meta)
     return {
         "event_id": str(uuid.uuid4()),
         "timestamp": get_iso_timestamp(),
@@ -112,9 +118,7 @@ def generate_intrusion_event(confidence: float, bbox: list) -> dict:
         "coordinates": GEO_COORDINATES,
         "event_type": "person_detected",
         "confidence": round(float(confidence), 4),
-        "raw_meta": {
-            "bbox": [int(b) for b in bbox]
-        }
+        "raw_meta": raw_meta,
     }
 
 
@@ -249,6 +253,8 @@ def main():
     try:
         while True:
             frame_start_time = time.time()
+            t_cap_utc = get_iso_timestamp()
+            t_cap_ns = time.perf_counter_ns()
 
             # Step 1: Read a frame from the video
             ret, frame = cap.read()
@@ -283,10 +289,9 @@ def main():
                 latest_detections = []
 
                 # Run inference at reduced image size (320) for 2-3x faster CPU execution:
-                # - imgsz=INFERENCE_IMG_SIZE: Downscale inference to 320 for speed
-                # - classes=[0]: Only detect class 0 ('person' in COCO dataset)
-                # - verbose=False: Suppress default per-frame YOLO printouts
+                t_inf_start_ns = time.perf_counter_ns()
                 results = model(frame, imgsz=INFERENCE_IMG_SIZE, classes=[0], verbose=False)
+                t_inf_end_ns = time.perf_counter_ns()
 
                 # Process detection results
                 for r in results:
@@ -316,8 +321,21 @@ def main():
                             if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
                                 last_alert_time = current_time
 
+                                t_evt_gen_ns = time.perf_counter_ns()
+                                t_evt_gen_utc = get_iso_timestamp()
+                                timing_meta = {
+                                    "frame_capture_timestamp_utc": t_cap_utc,
+                                    "event_generation_timestamp_utc": t_evt_gen_utc,
+                                    "frame_capture_monotonic_ns": t_cap_ns,
+                                    "inference_start_ns": t_inf_start_ns,
+                                    "inference_end_ns": t_inf_end_ns,
+                                    "yolo_inference_ms": round((t_inf_end_ns - t_inf_start_ns) / 1e6, 2),
+                                    "event_generation_ns": t_evt_gen_ns,
+                                    "trace_id": f"trc-{uuid.uuid4().hex[:8]}",
+                                }
+
                                 # Construct the standardized intrusion event dictionary
-                                alert_event = generate_intrusion_event(conf, [x1, y1, x2, y2])
+                                alert_event = generate_intrusion_event(conf, [x1, y1, x2, y2], timing_meta=timing_meta)
 
                                 # Print the alert dictionary cleanly formatted to console
                                 print("\n🚨 [INTRUSION ALERT TRIGGERED] 🚨")

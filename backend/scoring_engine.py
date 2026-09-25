@@ -119,8 +119,52 @@ class ScoringEngine:
 
             modality_scores[src] = round(best_event_contrib, 2)
 
+        # ----------------------------------------------------------------------
+        # Phase 3B Temporal & Behavioral Intelligence Layer
+        # ----------------------------------------------------------------------
+        from backend.temporal_engine import (
+            SequencePatternEngine,
+            BurstDetector,
+            BehavioralBaselineEngine,
+            calculate_recency_factor,
+            calculate_temporal_pattern_bonus,
+            calculate_behavioral_anomaly_bonus,
+        )
+
+        matched_patterns = SequencePatternEngine.evaluate_sequence_patterns(correlated_events)
+        detected_bursts = BurstDetector.detect_bursts(correlated_events)
+        
+        # Calculate zone statistics and off-shift state
+        ref_timestamp = correlated_events[-1].timestamp if correlated_events else datetime.now(timezone.utc).isoformat()
+        off_shift_flag = any(is_off_shift(ev.timestamp, shift_hours) or bool(ev.raw_meta.get("off_shift", False)) for ev in correlated_events)
+        zone_stats = BehavioralBaselineEngine.compute_zone_statistics(correlated_events, zone_info.get("zone_id", correlated_events[0].zone_id))
+        anomaly_ratio = zone_stats.get("anomaly_ratio", 1.0)
+
+        # Compute bounded bonus terms
+        pattern_bonus = calculate_temporal_pattern_bonus(matched_patterns)
+        anomaly_bonus = calculate_behavioral_anomaly_bonus(anomaly_ratio, off_shift_flag)
+        recency_factor = calculate_recency_factor(correlated_events[0].timestamp, ref_timestamp)
+
+        # Document factors
+        if matched_patterns:
+            for pat in matched_patterns:
+                factor_msg = f"Temporal sequence pattern matched: '{pat['pattern_name']}' (conf={pat['confidence']})"
+                if factor_msg not in contributing_factors:
+                    contributing_factors.append(factor_msg)
+
+        if detected_bursts:
+            for bst in detected_bursts:
+                factor_msg = bst["description"]
+                if factor_msg not in contributing_factors:
+                    contributing_factors.append(factor_msg)
+
+        if anomaly_ratio > 1.5:
+            factor_msg = f"Elevated zone event frequency detected ({zone_stats['events_per_minute']} events/min vs baseline {zone_stats['baseline_events_per_minute']})"
+            if factor_msg not in contributing_factors:
+                contributing_factors.append(factor_msg)
+
         base_sum = sum(modality_scores.values())
-        raw_scaled = base_sum * corr_multiplier * (zone_weight / 1.5)
+        raw_scaled = (base_sum + pattern_bonus + anomaly_bonus) * corr_multiplier * (zone_weight / 1.5)
         final_score = round(min(100.0, max(0.0, raw_scaled)), 2)
 
         if num_sources > 1:
@@ -133,19 +177,29 @@ class ScoringEngine:
             if factor_msg not in contributing_factors:
                 contributing_factors.append(factor_msg)
 
-        # Generate human-readable explanation
-        explanation = (
-            f"Correlated {len(correlated_events)} security event(s) across {num_sources} modality source(s) "
-            f"({', '.join(distinct_sources)}) in zone '{zone_info.get('name', correlated_events[0].zone_id)}' "
-            f"with corroboration multiplier {corr_multiplier}x."
-        )
+        # Generate XAI Plain English Explanation
+        if matched_patterns and num_sources >= 2:
+            pat_names = ", ".join([p["pattern_name"] for p in matched_patterns])
+            explanation = (
+                f"Threat score escalated because a restricted-zone VIDEO event was followed by off-shift IOT access "
+                f"and abnormal CYBER activity within the correlation window (Matched sequence: {pat_names})."
+            )
+        else:
+            explanation = (
+                f"Correlated {len(correlated_events)} security event(s) across {num_sources} modality source(s) "
+                f"({', '.join(distinct_sources)}) in zone '{zone_info.get('name', correlated_events[0].zone_id)}' "
+                f"with corroboration multiplier {corr_multiplier}x."
+            )
 
         # Build score breakdown dict
         score_breakdown = {
+            "base_score": round(base_sum, 2),
             "modality_contributions": modality_scores,
             "corroboration_multiplier": corr_multiplier,
             "zone_weight": zone_weight,
-            "raw_base_sum": round(base_sum, 2),
+            "temporal_pattern_bonus": pattern_bonus,
+            "behavioral_anomaly_bonus": anomaly_bonus,
+            "recency_factor": recency_factor,
             "final_score": final_score,
         }
 
@@ -211,6 +265,18 @@ class ScoringEngine:
             new_timeline.append(entry)
             existing_event_ids.add(ev.event_id)
 
+        from backend.temporal_engine import SequencePatternEngine
+        matched_patterns = SequencePatternEngine.evaluate_sequence_patterns(correlated_events)
+        for pat in matched_patterns:
+            pat_msg = f"SEQUENCE: Pattern matched '{pat['pattern_name']}'"
+            if not any(t.get("description") == pat_msg for t in new_timeline):
+                new_timeline.append({
+                    "timestamp": sorted(correlated_events, key=lambda e: e.timestamp)[-1].timestamp,
+                    "source": "TEMPORAL",
+                    "event_type": "pattern_matched",
+                    "description": pat_msg,
+                })
+
         now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         engine_entry_msg = f"ENGINE: Threat score evaluated as {score} ({severity})"
         if not any(t.get("description") == engine_entry_msg for t in new_timeline):
@@ -221,4 +287,5 @@ class ScoringEngine:
                 "description": engine_entry_msg,
             })
 
-        return new_timeline
+        # Ensure timeline remains strictly chronological by timestamp
+        return sorted(new_timeline, key=lambda x: str(x.get("timestamp", "")))

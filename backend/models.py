@@ -150,6 +150,10 @@ class Incident(BaseModel):
         default="open",
         description="Operational incident status: DETECTED, CORRELATED, SCORED, open, dispatched, ACKNOWLEDGED, RESOLVED, true_positive, false_positive",
     )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="End-to-end distributed trace identifier",
+    )
     explanation: str = Field(
         default="",
         description="Human-readable explanation of why this incident triggered",
