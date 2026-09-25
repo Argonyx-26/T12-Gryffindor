@@ -68,7 +68,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-600 selection:text-white">
       
       {/* 1. Tactical Header with Live Clock & WebSocket Indicator */}
-      <Header isConnected={isConnected} />
+      <Header isConnected={isConnected} threatPosture={threatPosture} />
 
       {/* 2. Main Dashboard Content Grid */}
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 md:p-6 flex flex-col gap-6">
