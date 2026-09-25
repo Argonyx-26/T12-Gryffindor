@@ -11,7 +11,7 @@ import { ShieldAlert, Clock, Radio, Activity, Terminal } from 'lucide-react';
  * 2. Live digital clock that ticks every second via a React useEffect timer
  * 3. System status telemetry indicators (DEFCON level, encryption status, active feed)
  */
-export default function Header() {
+export default function Header({ isConnected = false }) {
   // Store the current time in React state so the UI automatically re-renders every second
   const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -68,10 +68,17 @@ export default function Header() {
               <Terminal className="w-3 h-3 text-red-400" />
               <span>TACTICAL COMMAND CENTER</span>
               <span className="text-slate-600">|</span>
-              <span className="text-emerald-400 flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping inline-block" />
-                SYSTEM ONLINE
-              </span>
+              {isConnected ? (
+                <span className="text-emerald-400 flex items-center gap-1.5 font-mono font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                  Live
+                </span>
+              ) : (
+                <span className="text-amber-400 flex items-center gap-1.5 font-mono font-semibold animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-amber-500 inline-block animate-ping" />
+                  Reconnecting...
+                </span>
+              )}
             </p>
           </div>
         </div>
