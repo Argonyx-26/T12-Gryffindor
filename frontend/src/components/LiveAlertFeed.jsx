@@ -1,6 +1,6 @@
 import React from 'react';
 import AlertCard from './AlertCard';
-import { Flame, RefreshCw, Radio, Wifi, WifiOff, ShieldCheck } from 'lucide-react';
+import { Flame, RefreshCw, Wifi, WifiOff, ShieldCheck } from 'lucide-react';
 
 /**
  * LiveAlertFeed Component
