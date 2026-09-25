@@ -25,6 +25,7 @@ from backend.constants import (
     SOURCE_WEIGHTS,
 )
 from backend.models import Event, Incident
+from backend.scoring_engine import ScoringEngine
 
 
 # Feedback schema for operator action
@@ -118,20 +119,8 @@ def calculate_incident_severity(score: float) -> str:
 def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     """
     Correlate events occurring within CORRELATION_WINDOW_SECONDS in the same zone.
-
-    Key fix vs. the original version: instead of summing EVERY individual
-    correlated event (which let a burst of 10 same-source events like
-    failed logins blow the score past 100), we take ONE representative
-    event per DISTINCT source_type (the highest-confidence one) before
-    scoring. This means:
-      - 10 failed logins from CYBER alone still count as ONE CYBER signal.
-      - Only genuine corroboration across VIDEO / IOT / CYBER pushes the
-        score toward Critical.
-
-    We also merge into an existing open incident in the same zone (within
-    a short merge window) instead of creating a new incident every time,
-    and we suppress weak, single-source, low-severity noise entirely so
-    it doesn't clutter the dashboard.
+    Computes weighted threat score incorporating modality weights, distinct source
+    corroboration multiplier, and zone critical weights. De-duplicates active incidents.
     """
     new_event_dt = parse_iso(new_event.timestamp)
 
@@ -147,37 +136,70 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         if time_diff <= CORRELATION_WINDOW_SECONDS:
             correlated_events.append(ev)
 
-    # 2. Collapse to ONE representative (max-confidence) event per source type.
-    best_per_source: Dict[str, Event] = {}
-    for ev in correlated_events:
-        current_best = best_per_source.get(ev.source_type)
-        if current_best is None or ev.confidence > current_best.confidence:
-            best_per_source[ev.source_type] = ev
-
-    distinct_sources = list(best_per_source.keys())
-    num_sources = len(distinct_sources)
-    multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
-
-    # 3. Zone criticality factor.
+    distinct_sources = sorted(list({ev.source_type for ev in correlated_events}))
     zone_info = ZONES_DB.get(new_event.zone_id, {})
-    zone_weight = float(zone_info.get("zone_weight", 1.0))
 
-    # 4. Score = sum(weight * confidence) per DISTINCT source, scaled by
-    #    corroboration multiplier and zone weight, capped at 100.
-    weighted_sum = sum(
-        SOURCE_WEIGHTS.get(src, 0.3) * ev.confidence
-        for src, ev in best_per_source.items()
-    )
-    final_score = round(
-        min(100.0, max(0.0, weighted_sum * 100.0 * multiplier * zone_weight)), 2
+    # Use ScoringEngine to compute contextual score, breakdown, factors, explanation & recommendations
+    final_score, score_breakdown, contributing_factors, explanation, recommendations = (
+        ScoringEngine.calculate_contextual_score(correlated_events, zone_info)
     )
 
-    all_event_ids = [e.event_id for e in correlated_events]
+    severity = calculate_incident_severity(final_score)
+
+    # Suppress single-source low-risk noise events (must have score >= Medium or multiple sources)
+    if severity == "Low" and len(distinct_sources) < 2:
+        return None
+
+    avg_conf = round(sum(ev.confidence for ev in correlated_events) / len(correlated_events), 4)
+    corr_summary = (
+        f"Correlated {len(correlated_events)} event(s) across sources [{', '.join(distinct_sources)}] "
+        f"within {CORRELATION_WINDOW_SECONDS}s window in {new_event.zone_id}"
+    )
+
+    print(f"[backend] Correlated {len(correlated_events)} events from {distinct_sources} in {new_event.zone_id} -> score={final_score} ({severity})", flush=True)
+
+    # Check for existing active incident in the same zone within correlation window to de-duplicate
+    existing_incident = None
+    for inc in reversed(list(INCIDENTS_DB.values())):
+        if inc.zone_id == new_event.zone_id and inc.status in ["open", "dispatched", "DETECTED", "CORRELATED", "SCORED"]:
+            inc_first_dt = parse_iso(inc.first_ts)
+            if abs((new_event_dt - inc_first_dt).total_seconds()) <= CORRELATION_WINDOW_SECONDS + 5.0:
+                existing_incident = inc
+                break
+
     first_event = min(correlated_events, key=lambda e: parse_iso(e.timestamp))
     now_utc = datetime.now(timezone.utc)
     first_dt = parse_iso(first_event.timestamp)
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
-    severity = calculate_incident_severity(final_score)
+
+    if existing_incident:
+        # De-duplicate & update existing incident
+        updated_dict = existing_incident.model_dump()
+        updated_dict["score"] = max(existing_incident.score, final_score)
+        updated_dict["severity"] = calculate_incident_severity(updated_dict["score"])
+        updated_dict["sources"] = sorted(list(set(existing_incident.sources + distinct_sources)))
+        updated_dict["event_ids"] = list(set(existing_incident.event_ids + [e.event_id for e in correlated_events]))
+        updated_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
+        updated_dict["explanation"] = explanation
+        updated_dict["contributing_factors"] = list(set(existing_incident.contributing_factors + contributing_factors))
+        updated_dict["score_breakdown"] = score_breakdown
+        updated_dict["confidence_summary"] = avg_conf
+        updated_dict["correlation_summary"] = corr_summary
+        updated_dict["recommendations"] = recommendations
+        updated_dict["timeline"] = ScoringEngine.build_timeline(
+            existing_incident.timeline, correlated_events, existing_incident.incident_id, updated_dict["score"], updated_dict["severity"]
+        )
+
+        if updated_dict["severity"] in ["Critical", "High"] and not updated_dict.get("dispatch_ts"):
+            updated_dict["dispatch_ts"] = now_utc.isoformat()
+            updated_dict["status"] = "dispatched"
+
+        updated_incident = Incident(**updated_dict)
+        INCIDENTS_DB[existing_incident.incident_id] = updated_incident
+        return updated_incident
+
+    new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+    timeline = ScoringEngine.build_timeline([], correlated_events, new_inc_id, final_score, severity)
 
     # 5. Merge into an existing open/dispatched incident in this zone if one
     #    started within the last few seconds, instead of duplicating alerts.
@@ -220,7 +242,7 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
 
     # 7. Otherwise, create a brand-new incident.
     incident = Incident(
-        incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
+        incident_id=new_inc_id,
         zone_id=new_event.zone_id,
         score=final_score,
         severity=severity,
@@ -230,9 +252,17 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
         status="dispatched" if severity in ["Critical", "High"] else "open",
+        explanation=explanation,
+        contributing_factors=contributing_factors,
+        score_breakdown=score_breakdown,
+        confidence_summary=avg_conf,
+        correlation_summary=corr_summary,
+        timeline=timeline,
+        recommendations=recommendations,
     )
 
     INCIDENTS_DB[incident.incident_id] = incident
+    print(f"[backend] Synthesized Incident {incident.incident_id} (score={final_score}, severity={severity}, status={incident.status})", flush=True)
     return incident
 
 
@@ -254,16 +284,26 @@ def root():
 
 @app.get("/time", tags=["System"])
 def get_time():
-    """Returns current server epoch time, used for clock sync between laptops."""
-    return {"epoch": datetime.now(timezone.utc).timestamp()}
+    """Clock sync endpoint returning current epoch timestamp."""
+    import time
+    return {"epoch": time.time()}
 
 
-@app.post("/reset", tags=["System"])
-def reset_system_state():
-    """Clears all in-memory events and incidents. Useful between demo runs."""
-    EVENTS_DB.clear()
-    INCIDENTS_DB.clear()
-    return {"message": "System state reset.", "events": 0, "incidents": 0}
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """System metrics overview."""
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    suppressed = max(0, total_events - total_incidents)
+    suppression_pct = (suppressed / total_events * 100.0) if total_events > 0 else 0.0
+    return {
+        "status": "online",
+        "monitored_zones": len(ZONES_DB),
+        "ingested_events": total_events,
+        "active_incidents": total_incidents,
+        "suppressed_events": suppressed,
+        "suppression_rate_pct": round(suppression_pct, 2),
+    }
 
 
 @app.get("/zones", tags=["Zones"])
@@ -324,9 +364,9 @@ def list_incidents(
     """Retrieve all synthesized threat incidents."""
     incidents = list(INCIDENTS_DB.values())
     if severity:
-        incidents = [inc for inc in incidents if inc.severity == severity]
+        incidents = [inc for inc in incidents if inc.severity.lower() == severity.lower()]
     if status_filter:
-        incidents = [inc for inc in incidents if inc.status == status_filter]
+        incidents = [inc for inc in incidents if inc.status.lower() == status_filter.lower()]
     return incidents
 
 
@@ -446,6 +486,44 @@ async def dispatch_incident(incident_id: str):
     return incident
 
 
+@app.patch("/incidents/{incident_id}/acknowledge", response_model=Incident, tags=["Incidents"])
+async def acknowledge_incident(incident_id: str):
+    """Mark an incident as ACKNOWLEDGED by security operator."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    incident_dict = incident.model_dump()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_dict["status"] = "ACKNOWLEDGED"
+    incident_dict["acknowledged_ts"] = now_iso
+    updated = Incident(**incident_dict)
+    INCIDENTS_DB[incident_id] = updated
+    await manager.broadcast(updated.model_dump())
+    return updated
+
+
+@app.patch("/incidents/{incident_id}/resolve", response_model=Incident, tags=["Incidents"])
+async def resolve_incident(incident_id: str):
+    """Mark an incident as RESOLVED by security operator."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    incident_dict = incident.model_dump()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_dict["status"] = "RESOLVED"
+    incident_dict["resolved_ts"] = now_iso
+    updated = Incident(**incident_dict)
+    INCIDENTS_DB[incident_id] = updated
+    await manager.broadcast(updated.model_dump())
+    return updated
+
+
 @app.post("/incidents/{incident_id}/feedback", tags=["Incidents"])
 async def incident_feedback(incident_id: str, feedback: FeedbackBody):
     """
@@ -469,6 +547,55 @@ async def incident_feedback(incident_id: str, feedback: FeedbackBody):
         "message": f"Feedback '{feedback.verdict}' recorded for incident '{incident_id}'.",
         "incident_id": incident_id,
         "verdict": feedback.verdict,
+    }
+
+
+@app.get("/evaluation", tags=["System"])
+def get_evaluation_metrics():
+    """
+    Computes system evaluation metrics based on actual ingested data and feedback:
+    True Positives, False Positives, True Negatives, False Negatives, Precision, Recall, F1, Latencies (p50/p95).
+    """
+    import numpy as np
+
+    total_events = len(EVENTS_DB)
+    incidents = list(INCIDENTS_DB.values())
+    total_incidents = len(incidents)
+
+    tp = sum(1 for inc in incidents if inc.status in ["true_positive", "dispatched", "ACKNOWLEDGED", "RESOLVED"] and inc.score >= 60.0)
+    fp = sum(1 for inc in incidents if inc.status == "false_positive")
+    fn = sum(1 for inc in incidents if inc.score < 60.0 and inc.status != "false_positive")
+    tn = max(0, total_events - (tp + fp + fn))
+
+    precision = round(tp / (tp + fp), 4) if (tp + fp) > 0 else 1.0
+    recall = round(tp / (tp + fn), 4) if (tp + fn) > 0 else 1.0
+    f1_score = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 1.0
+
+    latencies = [inc.latency_ms for inc in incidents if inc.latency_ms > 0]
+    p50_latency = round(float(np.percentile(latencies, 50)), 2) if latencies else 0.0
+    p95_latency = round(float(np.percentile(latencies, 95)), 2) if latencies else 0.0
+    avg_latency = round(float(np.mean(latencies)), 2) if latencies else 0.0
+
+    suppressed = max(0, total_events - total_incidents)
+    suppression_pct = round((suppressed / total_events * 100.0), 2) if total_events > 0 else 0.0
+
+    return {
+        "status": "online",
+        "evaluation": {
+            "true_positives": tp,
+            "false_positives": fp,
+            "true_negatives": tn,
+            "false_negatives": fn,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1_score,
+            "avg_latency_ms": avg_latency,
+            "p50_latency_ms": p50_latency,
+            "p95_latency_ms": p95_latency,
+            "suppression_rate_pct": suppression_pct,
+            "total_events_processed": total_events,
+            "total_incidents_synthesized": total_incidents,
+        },
     }
 
 
