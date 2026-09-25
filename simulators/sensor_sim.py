@@ -11,6 +11,24 @@ import random
 import time
 import sys
 import json
+import os
+import requests
+
+# FastAPI hub configuration
+HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
+INGEST_URL = f"{HUB_URL.rstrip('/')}/ingest"
+
+
+def send_event_to_hub(event: dict):
+    """
+    Sends the generated event as a POST request to the FastAPI server.
+    Logs status code and response message or friendly error if server unreachable.
+    """
+    try:
+        response = requests.post(INGEST_URL, json=event, timeout=5)
+        print(f"[SERVER RESPONSE] Status Code: {response.status_code} | Message: {response.text}\n")
+    except requests.RequestException as e:
+        print(f"[SERVER ERROR] Could not reach FastAPI server at {INGEST_URL}: {e}\n")
 
 
 def get_utc_timestamp() -> str:
@@ -20,7 +38,7 @@ def get_utc_timestamp() -> str:
 
 def generate_event(event_type: str = None) -> dict:
     """
-    Generates a single IoT door sensor event matching the required schema and prints it.
+    Generates a single IoT door sensor event matching the required schema, prints it, and sends it to the server.
     
     Args:
         event_type (str, optional): Type of event ('door_open', 'door_close', 'motion_detected').
@@ -44,7 +62,11 @@ def generate_event(event_type: str = None) -> dict:
     }
 
     # Print each event to the console as it's generated
-    print(f"[IOT SENSOR] Event Generated:\n{json.dumps(event, indent=2)}\n")
+    print(f"[IOT SENSOR] Event Generated:\n{json.dumps(event, indent=2)}")
+
+    # Send event to FastAPI server
+    send_event_to_hub(event)
+
     return event
 
 
