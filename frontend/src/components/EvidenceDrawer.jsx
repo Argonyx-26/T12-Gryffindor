@@ -1,5 +1,5 @@
 import React from 'react';
-import { Camera, ListFilter, ShieldAlert, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
+import { Camera, ListFilter, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
 
 /**
  * EvidenceDrawer Component

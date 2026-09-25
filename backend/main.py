@@ -1,12 +1,13 @@
 """
-Main FastAPI application for Intelligent Threat Detection & Situational Awareness System.
-Provides endpoints for event ingestion, threat correlation, incident dispatch, and zone management.
+Main FastAPI application for Gryffindor- Intelligent Threat Detection & Situational Awareness System.
+Provides endpoints for event ingestion, real-time threat correlation, temporal queries, and incident management.
 """
 
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -56,12 +57,12 @@ manager = ConnectionManager()
 
 # Initialize FastAPI App
 app = FastAPI(
-    title="Intelligent Threat Detection & Situational Awareness API",
-    description="Multi-modal surveillance fusion engine combining CCTV, IoT sensors, and cyber access logs.",
+    title="Gryffindor API",
+    description="Intelligent Threat Detection & Situational Awareness System - Multi-modal surveillance fusion engine combining CCTV, IoT sensors, and cyber access logs.",
     version="1.0.0",
 )
 
-# Enable CORS for frontend clients / dashboards
+# 1. Enable CORS for all origins (so React frontend on different computers / ports can connect)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -71,22 +72,28 @@ app.add_middleware(
 )
 
 # In-memory storage for hackathon prototype
+event_store: List[Dict[str, Any]] = []
 ZONES_DB: Dict[str, Dict[str, Any]] = {}
-EVENTS_DB: List[Event] = []
 INCIDENTS_DB: Dict[str, Incident] = {}
 
 # Locate and load data/zones.json
 BASE_DIR = Path(__file__).resolve().parent.parent
 ZONES_FILE = BASE_DIR / "data" / "zones.json"
+if not ZONES_FILE.exists():
+    ZONES_FILE = Path("data") / "zones.json"
 
 
 def load_zones():
     """Load zones from data/zones.json into memory."""
     global ZONES_DB
     if ZONES_FILE.exists():
-        with open(ZONES_FILE, "r", encoding="utf-8") as f:
-            zones_list = json.load(f)
-            ZONES_DB = {z["id"]: z for z in zones_list}
+        try:
+            with open(ZONES_FILE, "r", encoding="utf-8") as f:
+                zones_list = json.load(f)
+                ZONES_DB = {z["id"]: z for z in zones_list}
+        except Exception as e:
+            print(f"[WARNING] Failed to load zones from {ZONES_FILE}: {e}")
+            ZONES_DB = {}
     else:
         ZONES_DB = {}
 
@@ -114,60 +121,60 @@ def calculate_incident_severity(score: float) -> str:
     return "Low"
 
 
-def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
+def evaluate_threat_correlation(new_event_dict: Dict[str, Any]) -> Optional[Incident]:
     """
     Correlate events occurring within CORRELATION_WINDOW_SECONDS in the same zone.
     Computes weighted threat score incorporating modality weights, distinct source
     corroboration multiplier, and zone critical weights.
     """
-    new_event_dt = parse_iso(new_event.timestamp)
+    new_event_dt = parse_iso(new_event_dict["timestamp"])
 
     # Find temporally correlated events in the same zone within the correlation window
-    correlated_events = [new_event]
-    for ev in reversed(EVENTS_DB):
-        if ev.event_id == new_event.event_id:
+    correlated_events = [new_event_dict]
+    for ev in reversed(event_store):
+        if ev.get("event_id") == new_event_dict.get("event_id"):
             continue
-        if ev.zone_id != new_event.zone_id:
+        if ev.get("zone_id") != new_event_dict.get("zone_id"):
             continue
-        ev_dt = parse_iso(ev.timestamp)
+        ev_dt = parse_iso(ev["timestamp"])
         time_diff = abs((new_event_dt - ev_dt).total_seconds())
         if time_diff <= CORRELATION_WINDOW_SECONDS:
             correlated_events.append(ev)
 
-    distinct_sources = list({ev.source_type for ev in correlated_events})
+    distinct_sources = list({ev["source_type"] for ev in correlated_events})
     num_sources = len(distinct_sources)
     multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
 
     # Zone criticality factor
-    zone_info = ZONES_DB.get(new_event.zone_id, {})
+    zone_info = ZONES_DB.get(new_event_dict.get("zone_id", ""), {})
     zone_weight = float(zone_info.get("zone_weight", 1.0))
 
     # Base weighted confidence score: sum(source_weight * confidence)
     base_score = 0.0
     for ev in correlated_events:
-        weight = SOURCE_WEIGHTS.get(ev.source_type, 0.3)
-        base_score += ev.confidence * weight * 100.0
+        weight = SOURCE_WEIGHTS.get(ev["source_type"], 0.3)
+        base_score += float(ev["confidence"]) * weight * 100.0
 
     # Normalize base score by number of events and scale by multiplier & zone weight
     normalized_score = (base_score / len(correlated_events)) * multiplier * (zone_weight / 1.5)
     final_score = round(min(100.0, max(0.0, normalized_score)), 2)
 
-    # If score qualifies for detection, generate or update an Incident
-    first_event = min(correlated_events, key=lambda e: parse_iso(e.timestamp))
+    # First event timestamp and latency calculation
+    first_event = min(correlated_events, key=lambda e: parse_iso(e["timestamp"]))
     now_utc = datetime.now(timezone.utc)
-    first_dt = parse_iso(first_event.timestamp)
+    first_dt = parse_iso(first_event["timestamp"])
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
 
     severity = calculate_incident_severity(final_score)
 
     incident = Incident(
         incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
-        zone_id=new_event.zone_id,
+        zone_id=new_event_dict["zone_id"],
         score=final_score,
         severity=severity,
         sources=distinct_sources,
-        event_ids=[e.event_id for e in correlated_events],
-        first_ts=first_event.timestamp,
+        event_ids=[e["event_id"] for e in correlated_events],
+        first_ts=first_event["timestamp"],
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
         status="dispatched" if severity in ["Critical", "High"] else "open",
@@ -177,20 +184,75 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     return incident
 
 
+# ==============================================================================
+# API Endpoints
+# ==============================================================================
+
 @app.get("/", tags=["System"])
 def root():
-    """Health check and high-level system metrics overview."""
+    """
+    Root endpoint indicating server health and operational status.
+    """
+    return {"message": "Gryffindor backend is running"}
+
+
+@app.get("/time", tags=["System"])
+def get_time():
+    """
+    Returns current server time as a unix epoch timestamp float.
+    Used for clock synchronization across distributed nodes and frontends.
+    """
+    return {"epoch": time.time()}
+
+
+@app.post("/ingest", status_code=status.HTTP_200_OK, tags=["Events"])
+def ingest_event(event: Event):
+    """
+    Ingest a security observation event from CCTV, IoT sensors, or cyber logs.
+    - Validates payload structure automatically using the Event Pydantic model
+    - Appends server-side UTC ingest_ts
+    - Logs the event payload to console
+    - Stores the event in-memory within event_store
+    - Runs multi-source threat correlation
+    - Returns acknowledgment JSON with event_id
+    """
+    # 1. Server-side UTC ingest timestamp
+    ingest_ts = datetime.now(timezone.utc).isoformat()
+    event_data = event.model_dump()
+    event_data["ingest_ts"] = ingest_ts
+
+    # 2. Print received event to console
+    print(f"\n[EVENT INGESTED] ID: {event.event_id} | Type: {event.event_type} | Source: {event.source_type} | Zone: {event.zone_id}")
+    print(json.dumps(event_data, indent=2))
+
+    # 3. Store in Python list in-memory
+    event_store.append(event_data)
+
+    # 4. Trigger threat correlation
+    try:
+        evaluate_threat_correlation(event_data)
+    except Exception as err:
+        print(f"[CORRELATION ERROR] {err}")
+
+    # 5. Return JSON response
     return {
-        "status": "online",
-        "service": "Intelligent Threat Detection & Situational Awareness System",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "stats": {
-            "monitored_zones": len(ZONES_DB),
-            "ingested_events": len(EVENTS_DB),
-            "active_incidents": len(INCIDENTS_DB),
-        },
-        "docs_url": "/docs",
+        "status": "received",
+        "event_id": event.event_id,
     }
+
+
+@app.post("/events", status_code=status.HTTP_200_OK, tags=["Events"], include_in_schema=False)
+def ingest_event_alias(event: Event):
+    """Compatibility alias endpoint for /ingest."""
+    return ingest_event(event)
+
+
+@app.get("/events", response_model=List[Dict[str, Any]], tags=["Events"])
+def get_events():
+    """
+    Returns all events currently stored in event_store, ordered most recent first.
+    """
+    return list(reversed(event_store))
 
 
 @app.get("/zones", tags=["Zones"])
@@ -198,49 +260,6 @@ def get_zones():
     """Retrieve all monitored zones, their geographic coordinates, and weights."""
     return list(ZONES_DB.values())
 
-
-@app.post("/events", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
-@app.post("/ingest", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
-async def ingest_event(event: Event):
-    """
-    Ingest a real-time event from CCTV, IoT, or Cyber sources.
-    Performs validation and runs immediate multi-source threat correlation.
-    """
-    # Prevent duplicate event IDs
-    if any(e.event_id == event.event_id for e in EVENTS_DB):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Event with id '{event.event_id}' already exists.",
-        )
-
-    # Store event
-    EVENTS_DB.append(event)
-
-    # Run multi-source threat correlation
-    incident = evaluate_threat_correlation(event)
-    if incident:
-        await manager.broadcast(incident.model_dump())
-
-    return {
-        "message": "Event ingested and processed successfully.",
-        "event_id": event.event_id,
-        "triggered_incident": incident.model_dump() if incident else None,
-    }
-
-
-@app.get("/events", response_model=List[Event], tags=["Events"])
-def list_events(
-    zone_id: Optional[str] = Query(None, description="Filter by zone ID"),
-    source_type: Optional[str] = Query(None, description="Filter by source modality"),
-    limit: int = Query(50, ge=1, le=500),
-):
-    """List recent events with optional filtering."""
-    results = EVENTS_DB
-    if zone_id:
-        results = [e for e in results if e.zone_id == zone_id]
-    if source_type:
-        results = [e for e in results if e.source_type == source_type]
-    return results[-limit:]
 
 
 @app.get("/incidents", response_model=List[Incident], tags=["Incidents"])

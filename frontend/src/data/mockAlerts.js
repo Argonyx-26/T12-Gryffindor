@@ -1,7 +1,7 @@
 /**
  * mockAlerts.js
  * 
- * Sample mock data representing real-time security alerts in the Gryffindor Sentinel system.
+ * Sample mock data representing real-time security alerts in the Gryffindor system.
  * In a production system, this data would stream in via WebSockets or SSE (Server-Sent Events).
  * 
  * Each alert includes:
