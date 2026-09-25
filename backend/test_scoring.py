@@ -2,7 +2,7 @@
 Test Threat Scoring Engine (backend/test_scoring.py)
 ------------------------------------------------------
 Validates threat correlation logic, multi-modality corroboration multiplier,
-zone weighting, and severity classification thresholds.
+zone weighting, noise suppression, and severity classification thresholds.
 """
 
 import os
@@ -42,8 +42,8 @@ class TestThreatScoring(unittest.TestCase):
         self.assertEqual(calculate_incident_severity(50.0), "Medium")
         self.assertEqual(calculate_incident_severity(25.0), "Low")
 
-    def test_single_source_correlation(self):
-        """Verify threat score calculation for a single isolated IoT event."""
+    def test_single_source_noise_suppression(self):
+        """Verify that single-source low risk noise events are suppressed (return None)."""
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         event = Event(
             event_id="test-evt-001",
@@ -52,20 +52,19 @@ class TestThreatScoring(unittest.TestCase):
             zone_id="Perimeter_Gate_3",
             coordinates=[12.9716, 77.5946],
             event_type="door_open",
-            confidence=1.0,
+            confidence=0.8,
             raw_meta={}
         )
         
         EVENTS_DB.append(event)
         incident = evaluate_threat_correlation(event)
         
-        self.assertIsNotNone(incident)
-        self.assertEqual(incident.zone_id, "Perimeter_Gate_3")
-        self.assertIn("IOT", incident.sources)
-        self.assertEqual(len(incident.event_ids), 1)
+        # Should be suppressed (return None) because it's single-source Low severity
+        self.assertIsNone(incident)
+        self.assertEqual(len(INCIDENTS_DB), 0)
 
     def test_multi_source_corroboration_multiplier(self):
-        """Verify that multi-source events (IoT + Cyber) apply corroboration multiplier."""
+        """Verify that multi-source events (IoT + Cyber) apply corroboration multiplier and create incident."""
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         
         iot_event = Event(
@@ -100,7 +99,7 @@ class TestThreatScoring(unittest.TestCase):
         self.assertIn("IOT", multi_incident.sources)
         self.assertIn("CYBER", multi_incident.sources)
         self.assertEqual(len(multi_incident.sources), 2)
-        self.assertGreater(multi_incident.score, 0.0)
+        self.assertGreaterEqual(multi_incident.score, 40.0)
 
 
 if __name__ == "__main__":

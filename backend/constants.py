@@ -28,4 +28,4 @@ SEVERITY_THRESHOLDS: Dict[str, int] = {
 }
 
 # Temporal correlation window in seconds to cluster multi-source events into a single incident
-CORRELATION_WINDOW_SECONDS: float = 1.5
+CORRELATION_WINDOW_SECONDS: float = 5.0

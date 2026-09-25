@@ -160,6 +160,10 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
 
     severity = calculate_incident_severity(final_score)
 
+    # Suppress single-source low-risk noise events (must have score >= Medium or multiple sources)
+    if severity == "Low" and len(distinct_sources) < 2:
+        return None
+
     incident = Incident(
         incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
         zone_id=new_event.zone_id,
@@ -190,6 +194,30 @@ def root():
             "active_incidents": len(INCIDENTS_DB),
         },
         "docs_url": "/docs",
+    }
+
+
+@app.get("/time", tags=["System"])
+def get_time():
+    """Clock sync endpoint returning current epoch timestamp."""
+    import time
+    return {"epoch": time.time()}
+
+
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """System metrics overview."""
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    suppressed = max(0, total_events - total_incidents)
+    suppression_pct = (suppressed / total_events * 100.0) if total_events > 0 else 0.0
+    return {
+        "status": "online",
+        "monitored_zones": len(ZONES_DB),
+        "ingested_events": total_events,
+        "active_incidents": total_incidents,
+        "suppressed_events": suppressed,
+        "suppression_rate_pct": round(suppression_pct, 2),
     }
 
 
