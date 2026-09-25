@@ -1,9 +1,6 @@
-<<<<<<< HEAD
-requests
-fastapi
-uvicorn
-pydantic
-=======
+ fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+requests>=2.28.0
 opencv-python>=4.8.0
 ultralytics>=8.0.0
->>>>>>> 84e32a25419cab0c7e9ea20d31963c08513137df

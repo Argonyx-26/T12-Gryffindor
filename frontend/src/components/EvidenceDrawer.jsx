@@ -59,6 +59,17 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
           <h3 className="text-xs font-bold tracking-wider text-slate-200 uppercase font-mono">
             EVIDENCE DRAWER <span className="text-slate-500">//</span> {incident_id}
           </h3>
+          {selectedAlert.status && (
+            <span className={`text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded border ${
+              selectedAlert.status === 'dispatched'
+                ? 'bg-cyan-950 text-cyan-300 border-cyan-500/40'
+                : selectedAlert.status === 'false_positive'
+                ? 'bg-slate-800 text-slate-400 border-slate-700'
+                : 'bg-emerald-950/60 text-emerald-400 border-emerald-500/30'
+            }`}>
+              {selectedAlert.status}
+            </span>
+          )}
         </div>
 
         <button
