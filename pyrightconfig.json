@@ -1,0 +1,8 @@
+{
+  "extraPaths": [
+    "C:/Users/ADMIN/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.11_qbz5n2kfra8p0/LocalCache/local-packages/Python311/site-packages",
+    "C:/Users/ADMIN/AppData/Local/Programs/Python/Python313/Lib/site-packages",
+    ".",
+    "simulators"
+  ]
+}
