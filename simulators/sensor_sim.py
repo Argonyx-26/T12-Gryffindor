@@ -1,130 +1,85 @@
 """
-IoT Sensor Simulator (sensor_sim.py)
------------------------------------
-Simulates physical IoT door sensor events for the Intelligent Threat Detection System.
-Generates telemetry data such as door opens, door closes, and motion detections.
-"""
+simulators/sensor_sim.py
+Mocks IoT door-contact / motion sensors. Emits `door_open` and `motion`
+events per the unified schema. Runs standalone (random ambient noise) or
+is driven by scenario_runner.py for the scripted 3-act demo.
 
-import uuid
-from datetime import datetime, timezone
+Standalone usage:
+    python sensor_sim.py                 # ambient noise loop, random zones
+    python sensor_sim.py --zone Server_Room --type door_open --off-shift
+"""
+import argparse
 import random
 import time
-import sys
-import json
-import os
-import requests
+from datetime import datetime, timezone
 
-# FastAPI hub configuration
-HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
-INGEST_URL = f"{HUB_URL.rstrip('/')}/ingest"
+from common import ZONES, init_producer, make_event, post_event
 
 
-def send_event_to_hub(event: dict):
-    """
-    Sends the generated event as a POST request to the FastAPI server.
-    Logs status code and response message or friendly error if server unreachable.
-    """
-    try:
-        response = requests.post(INGEST_URL, json=event, timeout=5)
-        print(f"[SERVER RESPONSE] Status Code: {response.status_code} | Message: {response.text}\n")
-    except requests.RequestException as e:
-        print(f"[SERVER ERROR] Could not reach FastAPI server at {INGEST_URL}: {e}\n")
+def is_off_shift(zone_id: str, when: datetime = None) -> bool:
+    when = when or datetime.now(timezone.utc)
+    start, end = ZONES[zone_id]["shift_hours"]
+    return not (start <= when.hour < end)
 
 
-def get_utc_timestamp() -> str:
-    """Generates ISO-8601 UTC timestamp string with millisecond precision and Z suffix."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def emit_door_open(zone_id: str, off_shift: bool = None, confidence: float = 0.97):
+    off = is_off_shift(zone_id) if off_shift is None else off_shift
+    evt = make_event(
+        source="sensor",
+        zone_id=zone_id,
+        event_type="door_open",
+        confidence=confidence,
+        payload={"off_shift": off, "contact_id": f"{zone_id}_DC1"},
+    )
+    ok = post_event(evt)
+    print(f"[sensor_sim] door_open zone={zone_id} off_shift={off} -> {'OK' if ok else 'FAIL'}")
+    return evt
 
 
-def generate_event(event_type: str = None) -> dict:
-    """
-    Generates a single IoT door sensor event matching the required schema, prints it, and sends it to the server.
-    
-    Args:
-        event_type (str, optional): Type of event ('door_open', 'door_close', 'motion_detected').
-                                    If None, a random type is selected.
-    
-    Returns:
-        dict: The generated event dictionary.
-    """
-    if not event_type:
-        event_type = random.choice(["door_open", "door_close", "motion_detected"])
-
-    event = {
-        "event_id": str(uuid.uuid4()),
-        "timestamp": get_utc_timestamp(),
-        "source_type": "IOT",
-        "zone_id": "Perimeter_Gate_3",
-        "coordinates": [12.9716, 77.5946],
-        "event_type": event_type,
-        "confidence": 1.0,
-        "raw_meta": {}
-    }
-
-    # Print each event to the console as it's generated
-    print(f"[IOT SENSOR] Event Generated:\n{json.dumps(event, indent=2)}")
-
-    # Send event to FastAPI server
-    send_event_to_hub(event)
-
-    return event
+def emit_motion(zone_id: str, confidence: float = 0.85):
+    evt = make_event(
+        source="sensor",
+        zone_id=zone_id,
+        event_type="motion",
+        confidence=confidence,
+        payload={"sensor_id": f"{zone_id}_PIR1"},
+    )
+    ok = post_event(evt)
+    print(f"[sensor_sim] motion zone={zone_id} -> {'OK' if ok else 'FAIL'}")
+    return evt
 
 
-def run_normal_mode(duration: float = None):
-    """
-    Simulates normal daily activity.
-    Generates occasional random events every 5-15 seconds.
-    
-    Args:
-        duration (float, optional): Maximum seconds to run. If None, runs indefinitely.
-    """
-    print("--- Starting IoT Sensor Simulator in NORMAL mode ---")
-    start_time = time.time()
-    
+def ambient_loop(interval_s: float = 4.0):
+    """Background noise: occasional in-shift door/motion events that should
+    get suppressed by the backend as single-source, non-anomalous activity."""
+    init_producer("sensor_sim")
+    zones = list(ZONES.keys())
+    print("[sensor_sim] ambient loop started (Ctrl+C to stop)")
     try:
         while True:
-            # Check if duration limit is reached (when called by scenario_runner)
-            if duration and (time.time() - start_time) >= duration:
-                print("--- IoT Sensor Simulator NORMAL mode duration complete ---")
-                break
-                
-            sleep_time = random.uniform(5, 15)
-            # If a duration limit is set, adjust sleep time to not exceed duration
-            if duration:
-                remaining = duration - (time.time() - start_time)
-                if remaining <= 0:
-                    break
-                if sleep_time > remaining:
-                    time.sleep(remaining)
-                    break
-
-            time.sleep(sleep_time)
-            generate_event()
-            
+            zone = random.choice(zones)
+            if random.random() < 0.5:
+                emit_door_open(zone, off_shift=False, confidence=round(random.uniform(0.8, 0.95), 2))
+            else:
+                emit_motion(zone, confidence=round(random.uniform(0.6, 0.9), 2))
+            time.sleep(interval_s + random.uniform(-1, 1))
     except KeyboardInterrupt:
-        print("\n--- Stopped IoT Sensor Simulator ---")
-
-
-def run_breach_mode() -> dict:
-    """
-    Simulates a security breach event.
-    Generates one clear 'door_open' event immediately.
-    
-    Returns:
-        dict: The breach event dictionary.
-    """
-    print("--- Triggering IoT Sensor BREACH mode ---")
-    event = generate_event(event_type="door_open")
-    return event
+        print("[sensor_sim] stopped")
 
 
 if __name__ == "__main__":
-    # Choose mode from terminal: python sensor_sim.py normal OR python sensor_sim.py breach
-    mode = "normal"
-    if len(sys.argv) > 1:
-        mode = sys.argv[1].lower()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--zone", choices=list(ZONES.keys()))
+    parser.add_argument("--type", choices=["door_open", "motion"])
+    parser.add_argument("--off-shift", action="store_true")
+    parser.add_argument("--interval", type=float, default=4.0)
+    args = parser.parse_args()
 
-    if mode == "breach":
-        run_breach_mode()
+    if args.zone and args.type:
+        init_producer("sensor_sim")
+        if args.type == "door_open":
+            emit_door_open(args.zone, off_shift=args.off_shift)
+        else:
+            emit_motion(args.zone)
     else:
-        run_normal_mode()
+        ambient_loop(args.interval)

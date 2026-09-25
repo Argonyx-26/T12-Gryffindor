@@ -157,8 +157,70 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
     }
   };
 
+  /**
+   * Action handler: Acknowledges incident
+   */
+  const handleAcknowledge = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'ACKNOWLEDGED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/acknowledge`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to acknowledge ${incident_id}:`, err);
+    }
+  };
+
+  /**
+   * Action handler: Resolves incident
+   */
+  const handleResolve = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'RESOLVED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/resolve`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to resolve ${incident_id}:`, err);
+    }
+  };
+
   const isDispatched = status === 'dispatched';
   const isFalsePositive = status === 'false_positive';
+  const isAcknowledged = status === 'ACKNOWLEDGED';
+  const isResolved = status === 'RESOLVED';
+
+  // Dynamic description logic:
+  // If 1 source: "Single-source detection: [source]"
+  // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
+  const getDisplayDescription = () => {
+    let sourcesList = Array.isArray(alert.sources)
+      ? alert.sources
+      : (alert.source_type ? [alert.source_type] : []);
+
+    let desc = alert.description;
+    if (sourcesList.length === 0 && typeof desc === 'string') {
+      const match = desc.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      return `Single-source detection: ${sourcesList[0]}`;
+    }
+    if (sourcesList.length >= 2) {
+      return `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    }
+    if (desc && (desc.startsWith('Corroborated multimodal detection across:') || desc.startsWith('Corroborated multi-vector detection across:'))) {
+      return 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+    return desc || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+  };
+
+  const displayDescription = getDisplayDescription();
 
   return (
     <div
@@ -214,9 +276,9 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           <h3 className="text-base font-semibold text-slate-100 group-hover:text-red-400 transition-colors truncate">
             {zone_id}
           </h3>
-          {alert.description && (
+          {displayDescription && (
             <p className="text-xs text-slate-400 mt-1 line-clamp-1 font-sans">
-              {alert.description}
+              {displayDescription}
             </p>
           )}
         </div>
@@ -233,8 +295,40 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         </div>
       </div>
 
-      {/* Action Buttons: Dispatch & Mark False Positive */}
+      {/* Action Buttons: Acknowledge, Resolve, False Positive & Dispatch */}
       <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center gap-2 justify-end flex-wrap">
+        {/* Acknowledge Button */}
+        <button
+          type="button"
+          onClick={handleAcknowledge}
+          disabled={isAcknowledged || isResolved}
+          title="Acknowledge alert (PATCH /incidents/{id}/acknowledge)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isAcknowledged
+              ? 'bg-amber-950/60 text-amber-300 border-amber-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-amber-400 hover:text-amber-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <Check className="w-3.5 h-3.5 text-amber-400" />
+          <span>{isAcknowledged ? 'ACK' : 'Acknowledge'}</span>
+        </button>
+
+        {/* Resolve Button */}
+        <button
+          type="button"
+          onClick={handleResolve}
+          disabled={isResolved}
+          title="Resolve alert (PATCH /incidents/{id}/resolve)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isResolved
+              ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-emerald-400 hover:text-emerald-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <span>{isResolved ? 'Resolved' : 'Resolve'}</span>
+        </button>
+
         {/* False Positive Button */}
         <button
           type="button"
