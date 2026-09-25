@@ -27,6 +27,8 @@ try:
     from backend.constants import (
         CORRELATION_WINDOW_SECONDS,
         CORROBORATION_MULTIPLIER,
+        DEDUPLICATION_WINDOW_SECONDS,
+        INCIDENT_COOLDOWN_SECONDS,
         SEVERITY_THRESHOLDS,
         SOURCE_WEIGHTS,
     )
@@ -35,6 +37,8 @@ except ImportError:
     from constants import (
         CORRELATION_WINDOW_SECONDS,
         CORROBORATION_MULTIPLIER,
+        DEDUPLICATION_WINDOW_SECONDS,
+        INCIDENT_COOLDOWN_SECONDS,
         SEVERITY_THRESHOLDS,
         SOURCE_WEIGHTS,
     )
@@ -161,17 +165,83 @@ manager = ws_manager
 class CorrelationEngine:
     """
     Maintains a rolling buffer of recent events grouped by zone_id with arrival times.
-    Evaluates multi-source threat correlation across temporal windows.
+    Evaluates multi-source threat correlation across temporal windows and implements
+    incident de-duplication:
+    - If a new incident would trigger in the same zone within 5s of an existing OPEN incident,
+      the existing incident is updated with the higher score and appended event_ids.
+    - If an incident closed in that zone, new incidents in that zone are suppressed for 5s.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        dedup_window_seconds: float = DEDUPLICATION_WINDOW_SECONDS,
+        cooldown_window_seconds: float = INCIDENT_COOLDOWN_SECONDS,
+    ):
         # zone_id -> list of recent events, each with its arrival time
         self.buffer: Dict[str, List[Dict[str, Any]]] = {}
+        # zone_id -> active open Incident
+        self.active_incidents: Dict[str, Incident] = {}
+        # zone_id -> epoch timestamp of last event processed for this incident
+        self.last_incident_time: Dict[str, float] = {}
+        # zone_id -> epoch timestamp when an incident in this zone was closed
+        self.last_closed_time: Dict[str, float] = {}
+        self.dedup_window_seconds: float = dedup_window_seconds
+        self.cooldown_window_seconds: float = cooldown_window_seconds
 
     @property
     def rolling_buffer(self) -> Dict[str, List[Dict[str, Any]]]:
         """Alias property for rolling buffer access."""
         return self.buffer
+
+    def record_incident_closed(self, zone_id: str, close_time: Optional[Any] = None) -> None:
+        """
+        Record that an incident in zone_id has closed (e.g. dispatched, true_positive, false_positive).
+        Starts the cooldown timer during which new incidents in that zone cannot be started.
+        """
+        if close_time is None:
+            epoch = time.time()
+        elif isinstance(close_time, (int, float)):
+            epoch = float(close_time)
+        elif isinstance(close_time, str):
+            try:
+                epoch = parse_iso(close_time).timestamp()
+            except Exception:
+                epoch = time.time()
+        elif isinstance(close_time, datetime):
+            epoch = close_time.timestamp()
+        else:
+            epoch = time.time()
+
+        self.last_closed_time[zone_id] = epoch
+        self.active_incidents.pop(zone_id, None)
+        self.last_incident_time.pop(zone_id, None)
+
+    def record_incident_opened(self, incident: Incident, open_time: Optional[Any] = None) -> None:
+        """Register an open incident for its zone, clearing any cooldown timer."""
+        if open_time is None:
+            epoch = time.time()
+        elif isinstance(open_time, (int, float)):
+            epoch = float(open_time)
+        elif isinstance(open_time, str):
+            try:
+                epoch = parse_iso(open_time).timestamp()
+            except Exception:
+                epoch = time.time()
+        elif isinstance(open_time, datetime):
+            epoch = open_time.timestamp()
+        else:
+            epoch = time.time()
+
+        self.active_incidents[incident.zone_id] = incident
+        self.last_incident_time[incident.zone_id] = epoch
+        self.last_closed_time.pop(incident.zone_id, None)
+
+    def reset(self) -> None:
+        """Clear all rolling buffers, active incidents, and cooldown timers."""
+        self.buffer.clear()
+        self.active_incidents.clear()
+        self.last_incident_time.clear()
+        self.last_closed_time.clear()
 
     def add_event(self, event_data: Dict[str, Any], arrival_time: Optional[float] = None) -> None:
         """Add an event to the rolling buffer for its zone and prune stale entries."""
@@ -243,8 +313,11 @@ class CorrelationEngine:
         now_dt = datetime.now(timezone.utc)
         ingest_ts_str = new_event_data.get("ingest_ts")
         if ingest_ts_str:
-            ingest_dt = parse_iso(ingest_ts_str)
-            latency_ms = round(max(0.0, (now_dt - ingest_dt).total_seconds() * 1000.0), 2)
+            try:
+                ingest_dt = parse_iso(ingest_ts_str)
+                latency_ms = round(max(0.0, (now_dt - ingest_dt).total_seconds() * 1000.0), 2)
+            except Exception:
+                latency_ms = 0.0
         else:
             latency_ms = 0.0
 
@@ -262,11 +335,120 @@ class CorrelationEngine:
         )
         return incident
 
-    def process_event(self, new_event_data: Dict[str, Any]) -> Incident:
-        """Correlate event against existing buffer and then register it in buffer."""
-        incident = self.correlate(new_event_data)
+    def process_event(self, new_event_data: Dict[str, Any]) -> Optional[Incident]:
+        """
+        Process an incoming event with multi-source correlation and incident de-duplication:
+        - If an incident closed in the same zone within cooldown_window_seconds (5s), suppress creating a new incident.
+        - If an OPEN incident exists in the same zone within dedup_window_seconds (5s):
+            - Update its score to the higher of the two scores.
+            - Update its severity accordingly.
+            - Add the new event_id to its events list.
+            - Merge any new source modalities.
+            - Return the updated incident for re-broadcasting.
+        - Otherwise, start a genuinely new incident if 5 seconds have passed since the last one closed,
+          or if it's a different zone.
+        """
+        zone_id = new_event_data.get("zone_id")
+        if not zone_id:
+            return None
+
+        # Determine event epoch timestamp
+        ts_str = new_event_data.get("timestamp")
+        if ts_str:
+            try:
+                event_epoch = parse_iso(ts_str).timestamp()
+            except Exception:
+                event_epoch = time.time()
+        else:
+            event_epoch = time.time()
+
+        # 1. Check cooldown: Has an incident closed in this zone within 5 seconds?
+        # Only start a genuinely new incident if 5 seconds have passed since the last one closed in that zone, or if it's a different zone.
+        if zone_id in self.last_closed_time:
+            closed_epoch = self.last_closed_time[zone_id]
+            time_since_closed = event_epoch - closed_epoch
+            if 0.0 <= time_since_closed < self.cooldown_window_seconds or abs(time_since_closed) < self.cooldown_window_seconds:
+                # Suppress incident creation during cooldown
+                self.add_event(new_event_data)
+                return None
+            else:
+                # Cooldown expired (5 seconds have passed since last one closed)
+                self.last_closed_time.pop(zone_id, None)
+
+        # 2. Check de-duplication against existing OPEN incident in the same zone
+        existing_incident = self.active_incidents.get(zone_id)
+        if existing_incident is not None:
+            # Check if incident status in INCIDENTS_DB was modified externally to non-open
+            db_inc = INCIDENTS_DB.get(existing_incident.incident_id)
+            if db_inc is not None and db_inc.status != "open":
+                self.record_incident_closed(zone_id, close_time=event_epoch)
+                # Re-check cooldown after recognizing external closure
+                if abs(event_epoch - self.last_closed_time.get(zone_id, 0)) < self.cooldown_window_seconds:
+                    self.add_event(new_event_data)
+                    return None
+                existing_incident = None
+
+        if existing_incident is not None and existing_incident.status == "open":
+            last_epoch = self.last_incident_time.get(zone_id, event_epoch)
+            time_diff = abs(event_epoch - last_epoch)
+            if time_diff <= self.dedup_window_seconds:
+                # Within 5 seconds of an existing OPEN incident in the same zone!
+                # Update existing incident: higher score, add event_id, merge sources
+                candidate = self.correlate(new_event_data)
+                higher_score = round(max(existing_incident.score, candidate.score), 2)
+                higher_severity = calculate_incident_severity(higher_score)
+
+                # Add new event_id to events list (avoid duplicates)
+                merged_event_ids = list(existing_incident.event_ids)
+                new_eid = new_event_data.get("event_id")
+                if new_eid and new_eid not in merged_event_ids:
+                    merged_event_ids.append(new_eid)
+                for eid in candidate.event_ids:
+                    if eid not in merged_event_ids:
+                        merged_event_ids.append(eid)
+
+                # Merge sources
+                merged_sources = list(existing_incident.sources)
+                for src in candidate.sources:
+                    if src not in merged_sources:
+                        merged_sources.append(src)
+                src_type = new_event_data.get("source_type")
+                if src_type and src_type not in merged_sources:
+                    merged_sources.append(src_type)
+
+                # Latency update (if ingest_ts is present)
+                now_dt = datetime.now(timezone.utc)
+                ingest_ts_str = new_event_data.get("ingest_ts")
+                if ingest_ts_str:
+                    try:
+                        ingest_dt = parse_iso(ingest_ts_str)
+                        latency_ms = round(max(0.0, (now_dt - ingest_dt).total_seconds() * 1000.0), 2)
+                    except Exception:
+                        latency_ms = existing_incident.latency_ms
+                else:
+                    latency_ms = existing_incident.latency_ms
+
+                updated_incident = existing_incident.model_copy(
+                    update={
+                        "score": higher_score,
+                        "severity": higher_severity,
+                        "event_ids": merged_event_ids,
+                        "sources": merged_sources,
+                        "latency_ms": latency_ms,
+                    }
+                )
+                self.active_incidents[zone_id] = updated_incident
+                self.last_incident_time[zone_id] = event_epoch
+                self.add_event(new_event_data)
+                return updated_incident
+
+        # 3. Genuinely new incident (5s passed since last closed, or 5s passed since open incident, or different zone)
+        new_incident = self.correlate(new_event_data)
+        self.active_incidents[zone_id] = new_incident
+        self.last_incident_time[zone_id] = event_epoch
+        self.last_closed_time.pop(zone_id, None)
         self.add_event(new_event_data)
-        return incident
+        return new_incident
 
 
 engine = CorrelationEngine()
@@ -316,9 +498,9 @@ async def ingest_event(event: Event):
     - Appends server-side UTC ingest_ts
     - Logs the event payload to console
     - Stores the event in-memory within event_store
-    - Runs multi-source threat correlation via CorrelationEngine
-    - Stores synthesized Incident in incident_store
-    - Broadcasts the new Incident to all connected WebSocket clients on /ws/alerts
+    - Runs multi-source threat correlation via CorrelationEngine with de-duplication
+    - Stores synthesized Incident in incident_store (or updates existing incident in-place)
+    - Broadcasts the Incident to all connected WebSocket clients on /ws/alerts
     - Returns acknowledgment JSON with event_id
     """
     # 1. Server-side UTC ingest timestamp
@@ -333,21 +515,32 @@ async def ingest_event(event: Event):
     # 3. Store in Python list in-memory
     event_store.append(event_data)
 
-    # 4. Trigger threat correlation and store incident
+    # 4. Trigger threat correlation & de-duplication
     incident = engine.process_event(event_data)
-    incident_store.append(incident)
-    INCIDENTS_DB[incident.incident_id] = incident
+    if incident is not None:
+        if incident.incident_id in INCIDENTS_DB:
+            # Existing incident updated via de-duplication: update in-place
+            INCIDENTS_DB[incident.incident_id] = incident
+            for idx, inc in enumerate(incident_store):
+                if inc.incident_id == incident.incident_id:
+                    incident_store[idx] = incident
+                    break
+        else:
+            # Genuinely new incident created
+            incident_store.append(incident)
+            INCIDENTS_DB[incident.incident_id] = incident
 
-    # 5. Broadcast new incident immediately to all WebSocket clients
-    try:
-        await ws_manager.broadcast_incident(incident)
-    except Exception as err:
-        print(f"[WEBSOCKET BROADCAST ERROR] {err}")
+        # 5. Broadcast or re-broadcast incident immediately to all WebSocket clients
+        try:
+            await ws_manager.broadcast_incident(incident)
+        except Exception as err:
+            print(f"[WEBSOCKET BROADCAST ERROR] {err}")
 
     # 6. Return JSON response
     return {
         "status": "received",
         "event_id": event.event_id,
+        "incident_id": incident.incident_id if incident else None,
     }
 
 
@@ -427,12 +620,17 @@ async def update_incident_status(
 ):
     """Update incident status (compatibility endpoint)."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    now_epoch = time.time()
     for idx, inc in enumerate(incident_store):
         if inc.incident_id == incident_id:
             dispatch_ts = now_iso if new_status == "dispatched" and not inc.dispatch_ts else inc.dispatch_ts
             updated_inc = inc.model_copy(update={"status": new_status, "dispatch_ts": dispatch_ts})
             incident_store[idx] = updated_inc
             INCIDENTS_DB[incident_id] = updated_inc
+            if new_status != "open":
+                engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+            else:
+                engine.record_incident_opened(updated_inc, open_time=now_epoch)
             await ws_manager.broadcast_incident(updated_inc)
             return updated_inc
 
@@ -442,6 +640,10 @@ async def update_incident_status(
         updated_inc = inc.model_copy(update={"status": new_status, "dispatch_ts": dispatch_ts})
         INCIDENTS_DB[incident_id] = updated_inc
         incident_store.append(updated_inc)
+        if new_status != "open":
+            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+        else:
+            engine.record_incident_opened(updated_inc, open_time=now_epoch)
         await ws_manager.broadcast_incident(updated_inc)
         return updated_inc
 
@@ -458,6 +660,10 @@ async def update_incident_status(
     )
     INCIDENTS_DB[incident_id] = updated_inc
     incident_store.append(updated_inc)
+    if new_status != "open":
+        engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+    else:
+        engine.record_incident_opened(updated_inc, open_time=now_epoch)
     await ws_manager.broadcast_incident(updated_inc)
     return updated_inc
 
@@ -468,11 +674,13 @@ async def dispatch_incident(incident_id: str):
     Sets the incident's status to 'dispatched' and dispatch_ts to current server time.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    now_epoch = time.time()
     for idx, inc in enumerate(incident_store):
         if inc.incident_id == incident_id:
             updated_inc = inc.model_copy(update={"status": "dispatched", "dispatch_ts": now_iso})
             incident_store[idx] = updated_inc
             INCIDENTS_DB[incident_id] = updated_inc
+            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
             await ws_manager.broadcast_incident(updated_inc)
             return updated_inc
 
@@ -481,6 +689,7 @@ async def dispatch_incident(incident_id: str):
         updated_inc = inc.model_copy(update={"status": "dispatched", "dispatch_ts": now_iso})
         INCIDENTS_DB[incident_id] = updated_inc
         incident_store.append(updated_inc)
+        engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
         await ws_manager.broadcast_incident(updated_inc)
         return updated_inc
 
@@ -497,6 +706,7 @@ async def dispatch_incident(incident_id: str):
     )
     INCIDENTS_DB[incident_id] = incident
     incident_store.append(incident)
+    engine.record_incident_closed(incident.zone_id, close_time=now_epoch)
     await ws_manager.broadcast_incident(incident)
     return incident
 
@@ -508,11 +718,16 @@ async def submit_incident_feedback(incident_id: str, feedback: FeedbackRequest):
     that incident's status accordingly.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    now_epoch = time.time()
     for idx, inc in enumerate(incident_store):
         if inc.incident_id == incident_id:
             updated_inc = inc.model_copy(update={"status": feedback.verdict})
             incident_store[idx] = updated_inc
             INCIDENTS_DB[incident_id] = updated_inc
+            if feedback.verdict != "open":
+                engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+            else:
+                engine.record_incident_opened(updated_inc, open_time=now_epoch)
             await ws_manager.broadcast_incident(updated_inc)
             return updated_inc
 
@@ -521,6 +736,10 @@ async def submit_incident_feedback(incident_id: str, feedback: FeedbackRequest):
         updated_inc = inc.model_copy(update={"status": feedback.verdict})
         INCIDENTS_DB[incident_id] = updated_inc
         incident_store.append(updated_inc)
+        if feedback.verdict != "open":
+            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+        else:
+            engine.record_incident_opened(updated_inc, open_time=now_epoch)
         await ws_manager.broadcast_incident(updated_inc)
         return updated_inc
 
@@ -537,6 +756,10 @@ async def submit_incident_feedback(incident_id: str, feedback: FeedbackRequest):
     )
     INCIDENTS_DB[incident_id] = incident
     incident_store.append(incident)
+    if feedback.verdict != "open":
+        engine.record_incident_closed(incident.zone_id, close_time=now_epoch)
+    else:
+        engine.record_incident_opened(incident, open_time=now_epoch)
     await ws_manager.broadcast_incident(incident)
     return incident
 
