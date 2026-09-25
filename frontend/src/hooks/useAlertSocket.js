@@ -30,6 +30,7 @@ export function useAlertSocket(customUrl) {
   const socketRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
+  const connectRef = useRef(null);
 
   /**
    * Helper function to normalize alert fields so they map cleanly to the UI,
@@ -117,7 +118,7 @@ export function useAlertSocket(customUrl) {
         socketRef.current.onclose = null;
         socketRef.current.onerror = null;
         socketRef.current.close();
-      } catch (e) {
+      } catch {
         // ignore cleanup error
       }
       socketRef.current = null;
@@ -178,7 +179,7 @@ export function useAlertSocket(customUrl) {
         // Schedule auto-reconnect every 3 seconds
         reconnectTimerRef.current = setTimeout(() => {
           if (isMountedRef.current) {
-            connect();
+            connectRef.current?.();
           }
         }, RECONNECT_DELAY_MS);
       };
@@ -193,11 +194,16 @@ export function useAlertSocket(customUrl) {
       setConnectionStatus('reconnecting');
       reconnectTimerRef.current = setTimeout(() => {
         if (isMountedRef.current) {
-          connect();
+          connectRef.current?.();
         }
       }, RECONNECT_DELAY_MS);
     }
   }, [wsUrl, normalizeAlert]);
+
+  // Keep connectRef synchronized with connect function
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // Establish connection on mount and cleanup on unmount
   useEffect(() => {
