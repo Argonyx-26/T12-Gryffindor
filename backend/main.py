@@ -330,15 +330,6 @@ def list_incidents(
     return incidents
 
 
-@app.delete("/incidents", tags=["Incidents"])
-async def clear_all_incidents():
-    """Clear all incidents and events from in-memory storage and broadcast reset."""
-    INCIDENTS_DB.clear()
-    EVENTS_DB.clear()
-    await manager.broadcast([])
-    return {"message": "All incidents and events cleared successfully.", "active_incidents": 0}
-
-
 @app.get("/incidents/{incident_id}", response_model=Incident, tags=["Incidents"])
 def get_incident(incident_id: str):
     """Fetch details of a specific incident."""
