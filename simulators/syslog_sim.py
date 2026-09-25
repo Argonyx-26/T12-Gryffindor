@@ -1,180 +1,100 @@
 """
-Syslog Cyber Simulator (syslog_sim.py)
---------------------------------------
-Simulates computer system login attempts for the Intelligent Threat Detection System.
-Generates cyber telemetry data such as successful logins, failed logins, and login spikes.
-"""
+simulators/syslog_sim.py
+Mocks a syslog auth stream. Emits `login_failed` / `login_success` events
+for ambient traffic, and can fire a scripted `login_spike` burst (brute-force
+surge) for the multi-vector breach act. A lightweight rolling Z-score
+detector (mirrors ai/cyber_anomaly.py) decides when raw failed-login volume
+is itself anomalous, independent of the scripted spike.
 
-import uuid
-from datetime import datetime, timezone
+Standalone usage:
+    python syslog_sim.py                          # ambient loop
+    python syslog_sim.py --spike Server_Room       # fire one brute-force burst
+"""
+import argparse
 import random
 import time
-import sys
-import json
-import os
-import requests
+from collections import deque, defaultdict
 
-# FastAPI hub configuration
-HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
-INGEST_URL = f"{HUB_URL.rstrip('/')}/ingest"
+from common import ZONES, init_producer, make_event, post_event
 
-# Rolling anomaly detector state: timestamps of recent login_failed events
-FAILED_LOGIN_TIMESTAMPS = []
+IPS = ["10.2.4.{}".format(i) for i in range(2, 40)]
+USERS = ["svc_backup", "admin", "jdoe", "root", "svc_monitor", "guest"]
+
+# Rolling window of failed-login counts per zone, for local anomaly scoring.
+_window = defaultdict(lambda: deque(maxlen=30))
 
 
-def send_event_to_hub(event: dict):
-    """
-    Sends the generated event as a POST request to the FastAPI server.
-    Logs status code and response message or friendly error if server unreachable.
-    """
-    try:
-        response = requests.post(INGEST_URL, json=event, timeout=5)
-        print(f"[SERVER RESPONSE] Status Code: {response.status_code} | Message: {response.text}\n")
-    except requests.RequestException as e:
-        print(f"[SERVER ERROR] Could not reach FastAPI server at {INGEST_URL}: {e}\n")
+def _zscore(zone_id: str, value: int) -> float:
+    hist = list(_window[zone_id])
+    if len(hist) < 5:
+        return 0.0
+    mean = sum(hist) / len(hist)
+    var = sum((x - mean) ** 2 for x in hist) / len(hist)
+    std = var ** 0.5
+    return 0.0 if std == 0 else (value - mean) / std
 
 
-# Sample pool of usernames for fake event generation
-SAMPLE_USERNAMES = ["admin", "root", "jdoe", "sysadmin", "dev_user", "operator", "sec_analyst"]
+def emit_login(zone_id: str, success: bool, user: str = None, src_ip: str = None):
+    evt = make_event(
+        source="syslog",
+        zone_id=zone_id,
+        event_type="login_success" if success else "login_failed",
+        confidence=1.0,
+        payload={"user": user or random.choice(USERS), "src_ip": src_ip or random.choice(IPS)},
+    )
+    ok = post_event(evt)
+    print(f"[syslog_sim] {evt['type']} zone={zone_id} -> {'OK' if ok else 'FAIL'}")
+    return evt
 
 
-def get_utc_timestamp() -> str:
-    """Generates ISO-8601 UTC timestamp string with millisecond precision and Z suffix."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+def emit_login_spike(zone_id: str, burst: int = 12, confidence: float = 0.9):
+    """Fires `burst` rapid login_failed events from a small set of IPs (brute
+    force pattern), then emits a single login_spike anomaly event summarizing
+    it — this is the event the backend's cyber vector actually scores on."""
+    attacker_ips = random.sample(IPS, k=min(3, len(IPS)))
+    z = _zscore(zone_id, burst)
+    evt = make_event(
+        source="syslog",
+        zone_id=zone_id,
+        event_type="login_spike",
+        confidence=min(0.99, confidence + min(0.09, max(0, z) * 0.01)),
+        payload={"failed_count": burst, "window_s": 10, "src_ips": attacker_ips, "zscore": round(z, 2)},
+    )
+    ok = post_event(evt)
+    print(f"[syslog_sim] login_spike zone={zone_id} zscore={z:.2f} -> {'OK' if ok else 'FAIL'}")
+    _window[zone_id].append(burst)
+
+    for _ in range(burst):
+        emit_login(zone_id, success=False, user="admin", src_ip=random.choice(attacker_ips))
+        time.sleep(0.01)
+
+    return evt
 
 
-def generate_fake_ip() -> str:
-    """Generates a random fake IP address in the local subnet format."""
-    return f"192.168.1.{random.randint(10, 250)}"
-
-
-def generate_event(event_type: str = None, username: str = None, ip_address: str = None, confidence: float = 1.0) -> dict:
-    """
-    Generates a single Cyber login event matching the required schema, prints it, and sends it to the server.
-    
-    Args:
-        event_type (str, optional): 'login_success', 'login_failed', or 'login_spike'.
-        username (str, optional): Fake username. Randomly selected if None.
-        ip_address (str, optional): Fake IP address. Randomly generated if None.
-        confidence (float, optional): Confidence level. Defaults to 1.0.
-        
-    Returns:
-        dict: The generated event dictionary.
-    """
-    if not event_type:
-        # Under normal conditions: mostly success (~80%), rare failures (~20%)
-        event_type = random.choices(["login_success", "login_failed"], weights=[80, 20])[0]
-
-    if not username:
-        username = random.choice(SAMPLE_USERNAMES)
-
-    if not ip_address:
-        ip_address = generate_fake_ip()
-
-    event = {
-        "event_id": str(uuid.uuid4()),
-        "timestamp": get_utc_timestamp(),
-        "source_type": "CYBER",
-        "zone_id": "Server_Room",
-        "coordinates": [12.9720, 77.5950],
-        "event_type": event_type,
-        "confidence": confidence,
-        "raw_meta": {
-            "username": username,
-            "ip_address": ip_address
-        }
-    }
-
-    # Print each event to the console as it's generated
-    print(f"[CYBER SYSLOG] Event Generated:\n{json.dumps(event, indent=2)}")
-
-    # Send event to FastAPI server
-    send_event_to_hub(event)
-
-    # Rolling Anomaly Detector: Check for 5 or more failed logins within a 10-second window
-    if event_type == "login_failed":
-        now = time.time()
-        global FAILED_LOGIN_TIMESTAMPS
-        FAILED_LOGIN_TIMESTAMPS = [ts for ts in FAILED_LOGIN_TIMESTAMPS if now - ts <= 10.0]
-        FAILED_LOGIN_TIMESTAMPS.append(now)
-
-        if len(FAILED_LOGIN_TIMESTAMPS) >= 5:
-            print(f"[ANOMALY DETECTOR] Detected {len(FAILED_LOGIN_TIMESTAMPS)} failed logins within 10 seconds!")
-            print("[ANOMALY DETECTOR] Generating and sending login_spike anomaly event to server...\n")
-            FAILED_LOGIN_TIMESTAMPS.clear()
-            generate_event(
-                event_type="login_spike",
-                username=username,
-                ip_address=ip_address,
-                confidence=0.95
-            )
-
-    return event
-
-
-def run_normal_mode(duration: float = None):
-    """
-    Simulates normal daily system operations.
-    Generates occasional login_success and rare login_failed events every 5-15 seconds.
-    
-    Args:
-        duration (float, optional): Maximum seconds to run. If None, runs indefinitely.
-    """
-    print("--- Starting Syslog Cyber Simulator in NORMAL mode ---")
-    start_time = time.time()
-
+def ambient_loop(interval_s: float = 5.0):
+    init_producer("syslog_sim")
+    zones = list(ZONES.keys())
+    print("[syslog_sim] ambient loop started (Ctrl+C to stop)")
     try:
         while True:
-            # Check if duration limit is reached (when called by scenario_runner)
-            if duration and (time.time() - start_time) >= duration:
-                print("--- Syslog Cyber Simulator NORMAL mode duration complete ---")
-                break
-
-            sleep_time = random.uniform(5, 15)
-            if duration:
-                remaining = duration - (time.time() - start_time)
-                if remaining <= 0:
-                    break
-                if sleep_time > remaining:
-                    time.sleep(remaining)
-                    break
-
-            time.sleep(sleep_time)
-            generate_event()
-
+            zone = random.choice(zones)
+            success = random.random() < 0.85
+            emit_login(zone, success=success)
+            _window[zone].append(0 if success else 1)
+            time.sleep(interval_s + random.uniform(-1.5, 1.5))
     except KeyboardInterrupt:
-        print("\n--- Stopped Syslog Cyber Simulator ---")
-
-
-def run_breach_mode() -> list:
-    """
-    Simulates a brute-force cyber attack.
-    Rapidly generates 10 'login_failed' events within 2 seconds, which triggers the rolling anomaly detector.
-    
-    Returns:
-        list: List of generated breach event dictionaries.
-    """
-    print("--- Triggering Syslog Cyber BREACH mode (Brute-Force Attack Simulation) ---")
-    attacker_ip = "192.168.1.199"
-    target_user = "admin"
-    events = []
-
-    # Rapidly generate 10 login_failed attempts over ~1.5 seconds (0.15s interval)
-    for _ in range(10):
-        evt = generate_event(event_type="login_failed", username=target_user, ip_address=attacker_ip)
-        events.append(evt)
-        time.sleep(0.15)
-
-    return events
+        print("[syslog_sim] stopped")
 
 
 if __name__ == "__main__":
-    # Choose mode from terminal: python syslog_sim.py normal OR python syslog_sim.py breach
-    mode = "normal"
-    if len(sys.argv) > 1:
-        mode = sys.argv[1].lower()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--spike", choices=list(ZONES.keys()))
+    parser.add_argument("--burst", type=int, default=12)
+    parser.add_argument("--interval", type=float, default=5.0)
+    args = parser.parse_args()
 
-    if mode == "breach":
-        run_breach_mode()
+    if args.spike:
+        init_producer("syslog_sim")
+        emit_login_spike(args.spike, burst=args.burst)
     else:
-        run_normal_mode()
+        ambient_loop(args.interval)

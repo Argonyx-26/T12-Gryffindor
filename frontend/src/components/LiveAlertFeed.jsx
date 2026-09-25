@@ -73,7 +73,7 @@ export default function LiveAlertFeed({
           ) : (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-950/80 border border-amber-500/40 text-amber-400 font-mono text-xs animate-pulse shadow-[0_0_10px_rgba(245,158,11,0.2)]">
               <RefreshCw className="w-3 h-3 animate-spin" />
-              <span className="font-semibold tracking-wider">Reconnecting...</span>
+              <span className="font-semibold tracking-wider capitalize">{connectionStatus}...</span>
             </div>
           )}
         </div>
