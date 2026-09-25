@@ -40,15 +40,10 @@ from backend.db_models import (
     AuditLogModel,
 )
 from backend.models import Event, Incident
-<<<<<<< HEAD
 from backend.redis_client import REDIS_CLIENT
 from backend.scoring_engine import ScoringEngine
 
 logger = logging.getLogger("sentinel.main")
-=======
-from backend.scoring_engine import ScoringEngine
-
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
 
 # Feedback schema for operator action
 class FeedbackBody(BaseModel):
@@ -373,7 +368,6 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
     first_dt = parse_iso(first_event.timestamp)
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
 
-<<<<<<< HEAD
     # High-precision latency collection & pipeline stage breakdown
     from backend.latency_collector import LATENCY_COLLECTOR
     t_decision_ns = time.perf_counter_ns()
@@ -402,8 +396,6 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
             trace_id = ev.raw_meta["trace_id"]
             break
 
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     if existing_incident:
         # De-duplicate & update existing incident
         updated_dict = existing_incident.model_dump()
@@ -412,10 +404,7 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         updated_dict["sources"] = sorted(list(set(existing_incident.sources + distinct_sources)))
         updated_dict["event_ids"] = list(set(existing_incident.event_ids + [e.event_id for e in correlated_events]))
         updated_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
-<<<<<<< HEAD
         updated_dict["trace_id"] = existing_incident.trace_id or trace_id
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
         updated_dict["explanation"] = explanation
         updated_dict["contributing_factors"] = list(set(existing_incident.contributing_factors + contributing_factors))
         updated_dict["score_breakdown"] = score_breakdown
@@ -425,7 +414,6 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         updated_dict["timeline"] = ScoringEngine.build_timeline(
             existing_incident.timeline, correlated_events, existing_incident.incident_id, updated_dict["score"], updated_dict["severity"]
         )
-<<<<<<< HEAD
 
         if updated_dict["severity"] in ["Critical", "High"] and not updated_dict.get("dispatch_ts"):
             updated_dict["dispatch_ts"] = now_utc.isoformat()
@@ -435,19 +423,6 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         INCIDENTS_DB[existing_incident.incident_id] = updated_incident
         persist_incident_to_db(updated_incident)
         log_audit_action("incident_updated", updated_incident.incident_id, {"score": updated_incident.score})
-        return updated_incident
-
-    new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
-    timeline = ScoringEngine.build_timeline([], correlated_events, new_inc_id, final_score, severity)
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
-
-        if updated_dict["severity"] in ["Critical", "High"] and not updated_dict.get("dispatch_ts"):
-            updated_dict["dispatch_ts"] = now_utc.isoformat()
-            updated_dict["status"] = "dispatched"
-
-        updated_incident = Incident(**updated_dict)
-        INCIDENTS_DB[existing_incident.incident_id] = updated_incident
         return updated_incident
 
     new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
@@ -504,10 +479,7 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
         status="dispatched" if severity in ["Critical", "High"] else "open",
-<<<<<<< HEAD
         trace_id=trace_id,
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
         explanation=explanation,
         contributing_factors=contributing_factors,
         score_breakdown=score_breakdown,
@@ -518,11 +490,8 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
     )
 
     INCIDENTS_DB[incident.incident_id] = incident
-<<<<<<< HEAD
     persist_incident_to_db(incident)
     log_audit_action("incident_created", incident.incident_id, {"score": incident.score, "severity": incident.severity})
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     print(f"[backend] Synthesized Incident {incident.incident_id} (score={final_score}, severity={severity}, status={incident.status})", flush=True)
     return incident
 
@@ -637,19 +606,6 @@ def get_behavior_analytics():
 def get_metrics():
     """System metrics overview with structured latency breakdown."""
     from backend.latency_collector import LATENCY_COLLECTOR
-
-=======
-@app.get("/time", tags=["System"])
-def get_time():
-    """Clock sync endpoint returning current epoch timestamp."""
-    import time
-    return {"epoch": time.time()}
-
-
-@app.get("/metrics", tags=["System"])
-def get_metrics():
-    """System metrics overview."""
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     total_events = len(EVENTS_DB)
     total_incidents = len(INCIDENTS_DB)
     suppressed = max(0, total_events - total_incidents)
@@ -661,10 +617,7 @@ def get_metrics():
         "active_incidents": total_incidents,
         "suppressed_events": suppressed,
         "suppression_rate_pct": round(suppression_pct, 2),
-<<<<<<< HEAD
         "latency": LATENCY_COLLECTOR.get_metrics_summary(),
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     }
 
 
