@@ -26,10 +26,11 @@ export function useAlertSocket(customUrl) {
   // Connection state: 'connected' | 'reconnecting' | 'disconnected'
   const [connectionStatus, setConnectionStatus] = useState('reconnecting');
 
-  // Stable references for WebSocket instance and reconnect timer
+  // Stable references for WebSocket instance, reconnect timer, and dismissed alerts
   const socketRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
+  const dismissedIdsRef = useRef(new Set());
 
   /**
    * Helper function to normalize alert fields so they map cleanly to the UI,
@@ -165,7 +166,15 @@ export function useAlertSocket(customUrl) {
 
           // Handle both batch array of alerts or single alert object
           if (Array.isArray(rawData)) {
-            const normalizedBatch = rawData.map(normalizeAlert).filter(Boolean);
+            if (rawData.length === 0) {
+              setAlerts([]);
+              return;
+            }
+            const normalizedBatch = rawData
+              .map(normalizeAlert)
+              .filter(Boolean)
+              .filter((a) => !dismissedIdsRef.current.has(a.incident_id));
+
             setAlerts((prevAlerts) => {
               // Add new alerts to the TOP, avoiding duplicate IDs
               const existingIds = new Set(prevAlerts.map(a => a.incident_id));
@@ -175,6 +184,8 @@ export function useAlertSocket(customUrl) {
           } else if (rawData && typeof rawData === 'object') {
             const normalized = normalizeAlert(rawData);
             if (normalized) {
+              // A new incoming alert should always be displayed even if old batch was cleared
+              dismissedIdsRef.current.delete(normalized.incident_id);
               setAlerts((prevAlerts) => {
                 // If this alert already exists (e.g., status update broadcasted), update it
                 const existingIndex = prevAlerts.findIndex(a => a.incident_id === normalized.incident_id);
@@ -254,9 +265,40 @@ export function useAlertSocket(customUrl) {
     );
   }, []);
 
+  /**
+   * Clear all active alerts from local feed and request backend purge
+   */
+  const clearAlerts = useCallback(async () => {
+    setAlerts((currentAlerts) => {
+      currentAlerts.forEach((a) => {
+        if (a && a.incident_id) {
+          dismissedIdsRef.current.add(a.incident_id);
+        }
+      });
+      return [];
+    });
+
+    try {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      await fetch(`${apiUrl}/incidents`, { method: 'DELETE' });
+    } catch {
+      // Backend may not support DELETE /incidents yet
+    }
+  }, []);
+
+  /**
+   * Restore all previously dismissed alerts
+   */
+  const restoreAlerts = useCallback(() => {
+    dismissedIdsRef.current.clear();
+    connect();
+  }, [connect]);
+
   return {
     alerts,
     setAlerts,
+    clearAlerts,
+    restoreAlerts,
     connectionStatus,
     isConnected: connectionStatus === 'connected',
     isReconnecting: connectionStatus === 'reconnecting',
