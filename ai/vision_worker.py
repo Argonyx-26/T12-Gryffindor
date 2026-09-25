@@ -15,6 +15,7 @@ import uuid
 import json
 import argparse
 from datetime import datetime, timezone
+import requests
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -23,6 +24,10 @@ from ultralytics import YOLO
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
+
+# Central Ingestion Hub URL (configurable via HUB_URL environment variable)
+HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
+INGEST_URL = f"{HUB_URL.rstrip('/')}/ingest"
 
 # Default path to the input video file
 DEFAULT_VIDEO_PATH = os.path.join("data", "sample.mp4")
@@ -109,6 +114,23 @@ def generate_intrusion_event(confidence: float, bbox: list) -> dict:
     }
 
 
+def send_event_to_hub(event: dict) -> None:
+    """
+    Sends an intrusion event dictionary as an HTTP POST request to {HUB_URL}/ingest
+    using the Python 'requests' library.
+    
+    Wrapped in try/except so that network failures or a disconnected/slow server
+    never crash or freeze the OpenCV video processing loop.
+    """
+    try:
+        response = requests.post(INGEST_URL, json=event, timeout=3.0)
+        print(f"📡 [HUB RESPONSE] Status {response.status_code}: {response.text.strip()}")
+    except requests.exceptions.RequestException as exc:
+        print(f"⚠️ [HUB ERROR] Failed to send event to Hub at {INGEST_URL}: {exc}")
+    except Exception as exc:
+        print(f"⚠️ [HUB UNEXPECTED ERROR] Could not deliver alert to Hub: {exc}")
+
+
 # ==============================================================================
 # MAIN VISION PIPELINE
 # ==============================================================================
@@ -127,6 +149,12 @@ def main():
         "--video", "-v",
         default=DEFAULT_VIDEO_PATH,
         help=f"Path to video file or webcam index (default: '{DEFAULT_VIDEO_PATH}')"
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Optional maximum number of frames to process before exiting (useful for testing)"
     )
     args = parser.parse_args()
     video_source = args.video
@@ -147,8 +175,11 @@ def main():
             print("Exiting. Place your video and re-run the script.")
             return
 
-    # 2. Load YOLOv8 Nano Model
-    print(f"\n[INFO] Loading YOLO model: {MODEL_NAME}...")
+    # 2. Ingestion Endpoint Configuration
+    print(f"\n[INFO] Central Ingestion Hub: {INGEST_URL}")
+
+    # 3. Load YOLOv8 Nano Model
+    print(f"[INFO] Loading YOLO model: {MODEL_NAME}...")
     # This automatically downloads the weights 'yolov8n.pt' on first run
     model = YOLO(MODEL_NAME)
     print("[INFO] Model loaded successfully.")
@@ -214,6 +245,11 @@ def main():
 
             frame_count += 1
 
+            # Stop if max_frames limit is set and reached (for testing/automation)
+            if args.max_frames and frame_count > args.max_frames:
+                print(f"\n[INFO] Reached requested limit of {args.max_frames} frames. Exiting.")
+                break
+
             # Step 2: Run YOLOv8 Nano at throttled ~5 FPS rate
             # Only run inference every `frame_interval` frames
             if frame_count % frame_interval == 0:
@@ -258,6 +294,9 @@ def main():
                                 # Print the alert dictionary cleanly formatted to console
                                 print("\n🚨 [INTRUSION ALERT TRIGGERED] 🚨")
                                 print(json.dumps(alert_event, indent=2))
+
+                                # Send event as HTTP POST request to {HUB_URL}/ingest
+                                send_event_to_hub(alert_event)
                                 print("-" * 70)
 
             # Step 3: Visual Annotations
