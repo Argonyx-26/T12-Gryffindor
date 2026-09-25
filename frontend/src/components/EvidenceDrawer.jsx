@@ -1,5 +1,5 @@
 import React from 'react';
-import { Camera, ListFilter, ShieldAlert, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
+import { Camera, ListFilter, X, Radio, ChevronRight, Eye, Crosshair } from 'lucide-react';
 
 /**
  * EvidenceDrawer Component
@@ -36,6 +36,36 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
   }
 
   const { incident_id, zone_id, score, severity, timestamp, description, camera_id, correlated_events } = selectedAlert;
+
+  // Dynamic description logic:
+  // If 1 source: "Single-source detection: [source]"
+  // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
+  const getDisplayDescription = () => {
+    let sourcesList = Array.isArray(selectedAlert.sources)
+      ? selectedAlert.sources
+      : (selectedAlert.source_type ? [selectedAlert.source_type] : []);
+
+    let desc = description;
+    if (sourcesList.length === 0 && typeof desc === 'string') {
+      const match = desc.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      return `Single-source detection: ${sourcesList[0]}`;
+    }
+    if (sourcesList.length >= 2) {
+      return `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    }
+    if (desc && (desc.startsWith('Corroborated multimodal detection across:') || desc.startsWith('Corroborated multi-vector detection across:'))) {
+      return 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+    return desc || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+  };
+
+  const displayDescription = getDisplayDescription();
 
   // Severity color indicator helper
   const getBadgeColor = (sev) => {
@@ -110,10 +140,10 @@ export default function EvidenceDrawer({ selectedAlert, onClose }) {
           </div>
         </div>
 
-        {description && (
+        {displayDescription && (
           <div className="text-xs bg-slate-900/40 p-2.5 rounded border border-slate-800/60 text-slate-300 font-mono">
             <span className="text-slate-500 mr-2">[SYNOPSIS]</span>
-            {description}
+            {displayDescription}
           </div>
         )}
 

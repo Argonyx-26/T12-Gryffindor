@@ -40,6 +40,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-red-500 font-extrabold drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
           accentBorder: 'border-l-red-500',
           cardGlow: 'glow-critical bg-red-950/20 border-red-500/50',
+          selectedRing: 'ring-2 ring-red-500 shadow-[0_0_25px_rgba(239,68,68,0.35)]',
+          selectedPill: 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]',
         };
       case 'High':
         return {
@@ -49,6 +51,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-amber-400 font-extrabold',
           accentBorder: 'border-l-amber-500',
           cardGlow: 'bg-amber-950/15 border-amber-500/30 hover:border-amber-400/50',
+          selectedRing: 'ring-2 ring-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.3)]',
+          selectedPill: 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.9)]',
         };
       case 'Medium':
         return {
@@ -58,6 +62,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-yellow-400 font-extrabold',
           accentBorder: 'border-l-yellow-400',
           cardGlow: 'bg-yellow-950/10 border-yellow-500/30 hover:border-yellow-400/50',
+          selectedRing: 'ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.3)]',
+          selectedPill: 'bg-yellow-400 shadow-[0_0_10px_rgba(234,179,8,0.9)]',
         };
       case 'Low':
       default:
@@ -68,6 +74,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-emerald-400 font-extrabold',
           accentBorder: 'border-l-emerald-500',
           cardGlow: 'bg-emerald-950/10 border-emerald-500/30 hover:border-emerald-400/50',
+          selectedRing: 'ring-2 ring-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.3)]',
+          selectedPill: 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.9)]',
         };
     }
   };
@@ -152,6 +160,36 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
   const isDispatched = status === 'dispatched';
   const isFalsePositive = status === 'false_positive';
 
+  // Dynamic description logic:
+  // If 1 source: "Single-source detection: [source]"
+  // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
+  const getDisplayDescription = () => {
+    let sourcesList = Array.isArray(alert.sources)
+      ? alert.sources
+      : (alert.source_type ? [alert.source_type] : []);
+
+    let desc = alert.description;
+    if (sourcesList.length === 0 && typeof desc === 'string') {
+      const match = desc.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      return `Single-source detection: ${sourcesList[0]}`;
+    }
+    if (sourcesList.length >= 2) {
+      return `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    }
+    if (desc && (desc.startsWith('Corroborated multimodal detection across:') || desc.startsWith('Corroborated multi-vector detection across:'))) {
+      return 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+    return desc || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+  };
+
+  const displayDescription = getDisplayDescription();
+
   return (
     <div
       onClick={() => onSelect(alert)}
@@ -159,8 +197,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         isFalsePositive ? 'opacity-50 grayscale-[30%]' : ''
       } ${
         isSelected
-          ? 'ring-2 ring-red-500/80 shadow-[0_0_25px_rgba(239,68,68,0.25)]'
-          : 'border-t border-r border-b'
+          ? `${style.selectedRing} bg-slate-900/95`
+          : 'bg-slate-900/60 hover:bg-slate-900/90 border-t border-r border-b border-slate-800 hover:border-slate-700'
       }`}
     >
       {/* Top Header of Card: Incident ID & Severity Badge */}
@@ -206,9 +244,9 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           <h3 className="text-base font-semibold text-slate-100 group-hover:text-red-400 transition-colors truncate">
             {zone_id}
           </h3>
-          {alert.description && (
+          {displayDescription && (
             <p className="text-xs text-slate-400 mt-1 line-clamp-1 font-sans">
-              {alert.description}
+              {displayDescription}
             </p>
           )}
         </div>
@@ -271,7 +309,7 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
 
       {/* Selected Indicator Pill */}
       {isSelected && (
-        <div className="absolute -right-1 top-1/2 -translate-y-1/2 bg-red-500 w-1.5 h-8 rounded-l-full shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
+        <div className={`absolute -right-1 top-1/2 -translate-y-1/2 w-1.5 h-8 rounded-l-full ${style.selectedPill}`} />
       )}
     </div>
   );

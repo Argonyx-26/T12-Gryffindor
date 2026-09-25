@@ -1,5 +1,5 @@
 import React from 'react';
-import { Map, Navigation, Layers, Compass, Maximize2, Shield, Radio } from 'lucide-react';
+import { Map, Navigation, Layers, Compass, Maximize2, Radio } from 'lucide-react';
 
 /**
  * MapPanel Component

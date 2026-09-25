@@ -29,3 +29,10 @@ SEVERITY_THRESHOLDS: Dict[str, int] = {
 
 # Temporal correlation window in seconds to cluster multi-source events into a single incident
 CORRELATION_WINDOW_SECONDS: float = 1.5
+
+# Deduplication window in seconds to merge consecutive events in the same zone into an existing open incident
+DEDUPLICATION_WINDOW_SECONDS: float = 5.0
+
+# Cooldown window in seconds after an incident is closed before a new incident can start in that zone
+INCIDENT_COOLDOWN_SECONDS: float = 5.0
+

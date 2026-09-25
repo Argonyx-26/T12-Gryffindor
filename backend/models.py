@@ -150,6 +150,10 @@ class Incident(BaseModel):
         default="open",
         description="Operational incident status: open, dispatched, true_positive, false_positive",
     )
+    description: Optional[str] = Field(
+        default=None,
+        description="Operational synopsis or tactical detection summary",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

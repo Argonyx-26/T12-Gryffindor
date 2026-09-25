@@ -26,6 +26,7 @@ from backend.constants import (
 )
 from backend.models import Event, Incident
 
+
 # Feedback schema for operator action
 class FeedbackBody(BaseModel):
     verdict: str = "false_positive"
@@ -117,12 +118,24 @@ def calculate_incident_severity(score: float) -> str:
 def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     """
     Correlate events occurring within CORRELATION_WINDOW_SECONDS in the same zone.
-    Computes weighted threat score incorporating modality weights, distinct source
-    corroboration multiplier, and zone critical weights.
+
+    Key fix vs. the original version: instead of summing EVERY individual
+    correlated event (which let a burst of 10 same-source events like
+    failed logins blow the score past 100), we take ONE representative
+    event per DISTINCT source_type (the highest-confidence one) before
+    scoring. This means:
+      - 10 failed logins from CYBER alone still count as ONE CYBER signal.
+      - Only genuine corroboration across VIDEO / IOT / CYBER pushes the
+        score toward Critical.
+
+    We also merge into an existing open incident in the same zone (within
+    a short merge window) instead of creating a new incident every time,
+    and we suppress weak, single-source, low-severity noise entirely so
+    it doesn't clutter the dashboard.
     """
     new_event_dt = parse_iso(new_event.timestamp)
 
-    # Find temporally correlated events in the same zone within the correlation window
+    # 1. Find all events in the same zone within the correlation window.
     correlated_events = [new_event]
     for ev in reversed(EVENTS_DB):
         if ev.event_id == new_event.event_id:
@@ -134,39 +147,85 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         if time_diff <= CORRELATION_WINDOW_SECONDS:
             correlated_events.append(ev)
 
-    distinct_sources = list({ev.source_type for ev in correlated_events})
+    # 2. Collapse to ONE representative (max-confidence) event per source type.
+    best_per_source: Dict[str, Event] = {}
+    for ev in correlated_events:
+        current_best = best_per_source.get(ev.source_type)
+        if current_best is None or ev.confidence > current_best.confidence:
+            best_per_source[ev.source_type] = ev
+
+    distinct_sources = list(best_per_source.keys())
     num_sources = len(distinct_sources)
     multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
 
-    # Zone criticality factor
+    # 3. Zone criticality factor.
     zone_info = ZONES_DB.get(new_event.zone_id, {})
     zone_weight = float(zone_info.get("zone_weight", 1.0))
 
-    # Base weighted confidence score: sum(source_weight * confidence)
-    base_score = 0.0
-    for ev in correlated_events:
-        weight = SOURCE_WEIGHTS.get(ev.source_type, 0.3)
-        base_score += ev.confidence * weight * 100.0
+    # 4. Score = sum(weight * confidence) per DISTINCT source, scaled by
+    #    corroboration multiplier and zone weight, capped at 100.
+    weighted_sum = sum(
+        SOURCE_WEIGHTS.get(src, 0.3) * ev.confidence
+        for src, ev in best_per_source.items()
+    )
+    final_score = round(
+        min(100.0, max(0.0, weighted_sum * 100.0 * multiplier * zone_weight)), 2
+    )
 
-    # Normalize base score by number of events and scale by multiplier & zone weight
-    normalized_score = (base_score / len(correlated_events)) * multiplier * (zone_weight / 1.5)
-    final_score = round(min(100.0, max(0.0, normalized_score)), 2)
-
-    # If score qualifies for detection, generate or update an Incident
+    all_event_ids = [e.event_id for e in correlated_events]
     first_event = min(correlated_events, key=lambda e: parse_iso(e.timestamp))
     now_utc = datetime.now(timezone.utc)
     first_dt = parse_iso(first_event.timestamp)
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
-
     severity = calculate_incident_severity(final_score)
 
+    # 5. Merge into an existing open/dispatched incident in this zone if one
+    #    started within the last few seconds, instead of duplicating alerts.
+    MERGE_WINDOW_SECONDS = 5.0
+    existing_incident = None
+    for inc in INCIDENTS_DB.values():
+        if inc.zone_id != new_event.zone_id:
+            continue
+        if inc.status not in ("open", "dispatched"):
+            continue
+        inc_first_dt = parse_iso(inc.first_ts)
+        if abs((new_event_dt - inc_first_dt).total_seconds()) <= MERGE_WINDOW_SECONDS:
+            existing_incident = inc
+            break
+
+    if existing_incident:
+        merged_event_ids = list(set(existing_incident.event_ids) | set(all_event_ids))
+        updated_score = max(existing_incident.score, final_score)
+        updated_severity = calculate_incident_severity(updated_score)
+        merged_sources = list(set(existing_incident.sources) | set(distinct_sources))
+
+        incident_dict = existing_incident.model_dump()
+        incident_dict["score"] = updated_score
+        incident_dict["severity"] = updated_severity
+        incident_dict["sources"] = merged_sources
+        incident_dict["event_ids"] = merged_event_ids
+        incident_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
+        if updated_severity in ("Critical", "High") and not incident_dict.get("dispatch_ts"):
+            incident_dict["dispatch_ts"] = now_utc.isoformat()
+            incident_dict["status"] = "dispatched"
+
+        updated_incident = Incident(**incident_dict)
+        INCIDENTS_DB[updated_incident.incident_id] = updated_incident
+        return updated_incident
+
+    # 6. Suppress weak, uncorroborated single-source noise entirely — this
+    #    is what drives your "noise suppression" metric.
+    if num_sources < 2 and severity == "Low":
+        return None
+
+    # 7. Otherwise, create a brand-new incident.
     incident = Incident(
         incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
         zone_id=new_event.zone_id,
         score=final_score,
         severity=severity,
         sources=distinct_sources,
-        event_ids=[e.event_id for e in correlated_events],
+        event_ids=all_event_ids,
         first_ts=first_event.timestamp,
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
@@ -191,6 +250,20 @@ def root():
         },
         "docs_url": "/docs",
     }
+
+
+@app.get("/time", tags=["System"])
+def get_time():
+    """Returns current server epoch time, used for clock sync between laptops."""
+    return {"epoch": datetime.now(timezone.utc).timestamp()}
+
+
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Clears all in-memory events and incidents. Useful between demo runs."""
+    EVENTS_DB.clear()
+    INCIDENTS_DB.clear()
+    return {"message": "System state reset.", "events": 0, "incidents": 0}
 
 
 @app.get("/zones", tags=["Zones"])
@@ -257,6 +330,15 @@ def list_incidents(
     return incidents
 
 
+@app.delete("/incidents", tags=["Incidents"])
+async def clear_all_incidents():
+    """Clear all incidents and events from in-memory storage and broadcast reset."""
+    INCIDENTS_DB.clear()
+    EVENTS_DB.clear()
+    await manager.broadcast([])
+    return {"message": "All incidents and events cleared successfully.", "active_incidents": 0}
+
+
 @app.get("/incidents/{incident_id}", response_model=Incident, tags=["Incidents"])
 def get_incident(incident_id: str):
     """Fetch details of a specific incident."""
@@ -287,6 +369,36 @@ def update_incident_status(
     updated_incident = Incident(**incident_dict)
     INCIDENTS_DB[incident_id] = updated_incident
     return updated_incident
+
+
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """
+    Returns headline demo metrics: total events, total incidents,
+    noise suppression percentage, and average incident latency.
+    """
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    if total_events > 0:
+        suppression_pct = round(
+            (1 - (total_incidents / total_events)) * 100.0, 2
+        )
+    else:
+        suppression_pct = 0.0
+
+    if total_incidents > 0:
+        avg_latency_ms = round(
+            sum(inc.latency_ms for inc in INCIDENTS_DB.values()) / total_incidents, 2
+        )
+    else:
+        avg_latency_ms = 0.0
+
+    return {
+        "total_events": total_events,
+        "total_incidents": total_incidents,
+        "noise_suppression_pct": suppression_pct,
+        "avg_latency_ms": avg_latency_ms,
+    }
 
 
 @app.websocket("/ws/alerts")

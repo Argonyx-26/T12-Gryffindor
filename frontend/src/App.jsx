@@ -7,7 +7,7 @@ import { useAlertSocket } from './hooks/useAlertSocket';
 import { Shield, AlertTriangle, Cpu, Radio } from 'lucide-react';
 
 /**
- * App Component - Root Dashboard for Gryffindor Sentinel
+ * App Component - Root Dashboard for Gryffindor
  * 
  * Architecture Overview:
  * 1. Live Data Source:
@@ -25,7 +25,7 @@ import { Shield, AlertTriangle, Cpu, Radio } from 'lucide-react';
  */
 export default function App() {
   // Connect to the real-time WebSocket alert stream
-  const { alerts, isConnected, connectionStatus, updateAlertStatus, wsUrl } = useAlertSocket();
+  const { alerts, clearAlerts, isConnected, connectionStatus, updateAlertStatus, wsUrl } = useAlertSocket();
 
   // Track the ID of the currently selected incident card for inspection in Evidence Drawer
   const [selectedAlertId, setSelectedAlertId] = useState(null);
@@ -53,14 +53,15 @@ export default function App() {
     setSelectedAlertId(null);
   };
 
-  // Compute threat posture dynamically from live alerts
-  const criticalCount = alerts.filter(a => a.severity === 'Critical').length;
-  const highCount = alerts.filter(a => a.severity === 'High').length;
+  // Compute threat posture dynamically from live alerts (excluding false positives)
+  const activeAlerts = alerts.filter(a => a.status !== 'false_positive');
+  const criticalCount = activeAlerts.filter(a => a.severity === 'Critical').length;
+  const highCount = activeAlerts.filter(a => a.severity === 'High').length;
   const threatPosture = criticalCount > 0
     ? 'DEFCON 1 // CRITICAL'
     : highCount > 0
     ? 'DEFCON 2 // ELEVATED'
-    : alerts.length > 0
+    : activeAlerts.length > 0
     ? 'DEFCON 3 // WATCH'
     : 'DEFCON 4 // NOMINAL';
 
@@ -68,7 +69,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-600 selection:text-white">
       
       {/* 1. Tactical Header with Live Clock & WebSocket Indicator */}
-      <Header isConnected={isConnected} />
+      <Header isConnected={isConnected} threatPosture={threatPosture} />
 
       {/* 2. Main Dashboard Content Grid */}
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 md:p-6 flex flex-col gap-6">
@@ -77,18 +78,18 @@ export default function App() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="bg-slate-900/60 border border-slate-800/80 p-3 rounded-lg flex items-center gap-3">
             <div className={`p-2 rounded border ${
-              alerts.length > 0
+              activeAlerts.length > 0
                 ? 'bg-red-950/60 border-red-500/30 text-red-400'
                 : 'bg-emerald-950/60 border-emerald-500/30 text-emerald-400'
             }`}>
-              {alerts.length > 0 ? <AlertTriangle className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
+              {activeAlerts.length > 0 ? <AlertTriangle className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
             </div>
             <div>
               <span className="text-[10px] text-slate-500 font-mono block">ACTIVE INCIDENTS</span>
               <span className={`text-sm font-bold font-mono ${
-                alerts.length > 0 ? 'text-slate-200' : 'text-emerald-400'
+                activeAlerts.length > 0 ? 'text-slate-200' : 'text-emerald-400'
               }`}>
-                {alerts.length === 0 ? '0 THREATS // NOMINAL' : `${alerts.length} ${alerts.length === 1 ? 'THREAT' : 'THREATS'}`}
+                {activeAlerts.length === 0 ? '0 THREATS // NOMINAL' : `${activeAlerts.length} ${activeAlerts.length === 1 ? 'THREAT' : 'THREATS'}`}
               </span>
             </div>
           </div>
@@ -157,6 +158,7 @@ export default function App() {
               selectedAlertId={activeAlert ? activeAlert.incident_id : null}
               onSelectAlert={handleSelectAlert}
               onUpdateStatus={updateAlertStatus}
+              onClearAlerts={clearAlerts}
               connectionStatus={connectionStatus}
               isConnected={isConnected}
             />
