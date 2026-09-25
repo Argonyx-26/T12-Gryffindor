@@ -1,6 +1,6 @@
 import React from 'react';
 import AlertCard from './AlertCard';
-import { Flame, RefreshCw, Radio, Wifi, WifiOff } from 'lucide-react';
+import { Flame, RefreshCw, Radio, Wifi, WifiOff, ShieldCheck } from 'lucide-react';
 
 /**
  * LiveAlertFeed Component
@@ -36,8 +36,12 @@ export default function LiveAlertFeed({
           <h2 className="text-sm font-bold tracking-wider text-slate-200 uppercase font-mono">
             LIVE ALERT FEED
           </h2>
-          <span className="text-xs font-mono font-semibold px-2 py-0.5 rounded-full bg-red-950/80 text-red-400 border border-red-500/30">
-            {alerts.length} ACTIVE
+          <span className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border ${
+            alerts.length === 0
+              ? 'bg-emerald-950/70 text-emerald-400 border-emerald-500/40'
+              : 'bg-red-950/80 text-red-400 border-red-500/30'
+          }`}>
+            {alerts.length === 0 ? '0 ACTIVE // NOMINAL' : `${alerts.length} ACTIVE`}
           </span>
         </div>
 
@@ -63,17 +67,32 @@ export default function LiveAlertFeed({
       {/* Feed List Container */}
       <div className="p-3.5 space-y-3 overflow-y-auto max-h-[520px]">
         {alerts.length === 0 ? (
-          <div className="p-8 text-center text-slate-500 font-mono text-xs border border-dashed border-slate-800 rounded-lg space-y-3 bg-slate-900/30">
-            <Radio className="w-8 h-8 text-slate-600 mx-auto animate-pulse" />
-            <div className="space-y-1">
-              <p className="font-bold text-slate-300 uppercase tracking-wider text-sm">
-                Awaiting Live Telemetry Stream
+          <div className="p-8 text-center border border-emerald-500/20 bg-emerald-950/10 rounded-xl space-y-4 my-2 transition-all duration-300">
+            <div className="relative mx-auto w-14 h-14 flex items-center justify-center rounded-full bg-emerald-950/60 border border-emerald-500/40 text-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.2)]">
+              <ShieldCheck className="w-7 h-7 text-emerald-400" />
+              <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              <p className="font-mono font-bold text-emerald-300 text-sm tracking-wider uppercase">
+                No active threats — systems nominal
               </p>
-              <p className="text-slate-500 text-xs max-w-sm mx-auto">
-                {isConnected
-                  ? 'WebSocket connected. Ready to capture incoming threat events from sensor and syslog ingestors.'
-                  : 'Attempting connection to backend WebSocket (auto-retrying every 3s)...'}
+              <p className="text-slate-400 text-xs font-sans max-w-sm mx-auto leading-relaxed">
+                Perimeter sensors, CCTV optical feeds, and AI correlation are actively armed. Incoming threats will appear here in real time.
               </p>
+            </div>
+            <div className="pt-2 flex items-center justify-center gap-4 text-[11px] font-mono text-slate-500 border-t border-slate-800/60">
+              <span className="flex items-center gap-1.5 text-emerald-400/80">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                SENSORS ARMED
+              </span>
+              <span>•</span>
+              <span className="flex items-center gap-1.5 text-cyan-400/80">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                AI ENGINE ACTIVE
+              </span>
             </div>
           </div>
         ) : (
