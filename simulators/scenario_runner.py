@@ -12,9 +12,13 @@ Phases executed:
 import time
 import threading
 
-# Import the simulator modules from the current directory
-import sensor_sim
-import syslog_sim
+# Import the simulator modules (supports running from repo root or simulators directory)
+try:
+    import sensor_sim
+    import syslog_sim
+except ImportError:
+    from simulators import sensor_sim
+    from simulators import syslog_sim
 
 
 def main():

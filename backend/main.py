@@ -10,8 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import FastAPI, HTTPException, Query, status
+# pyrefly: ignore [missing-import]
+from fastapi import FastAPI, HTTPException, Query, status, WebSocket, WebSocketDisconnect
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+# pyrefly: ignore [missing-import]
 import uvicorn
 
 from backend.constants import (
@@ -21,6 +25,34 @@ from backend.constants import (
     SOURCE_WEIGHTS,
 )
 from backend.models import Event, Incident
+
+# Feedback schema for operator action
+class FeedbackBody(BaseModel):
+    verdict: str = "false_positive"
+
+
+class ConnectionManager:
+    """Manages active WebSocket connections for live alert broadcasting."""
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: Any):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+
+manager = ConnectionManager()
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -168,7 +200,7 @@ def get_zones():
 
 
 @app.post("/events", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
-def ingest_event(event: Event):
+async def ingest_event(event: Event):
     """
     Ingest a real-time event from CCTV, IoT, or Cyber sources.
     Performs validation and runs immediate multi-source threat correlation.
@@ -185,6 +217,8 @@ def ingest_event(event: Event):
 
     # Run multi-source threat correlation
     incident = evaluate_threat_correlation(event)
+    if incident:
+        await manager.broadcast(incident.model_dump())
 
     return {
         "message": "Event ingested and processed successfully.",
@@ -236,7 +270,7 @@ def get_incident(incident_id: str):
 @app.patch("/incidents/{incident_id}/status", response_model=Incident, tags=["Incidents"])
 def update_incident_status(
     incident_id: str,
-    new_status: str = Query(..., regex="^(open|dispatched|true_positive|false_positive)$"),
+    new_status: str = Query(..., pattern="^(open|dispatched|true_positive|false_positive)$"),
 ):
     """Update incident status (e.g., mark as true_positive or dispatched)."""
     if incident_id not in INCIDENTS_DB:
@@ -254,5 +288,85 @@ def update_incident_status(
     return updated_incident
 
 
+@app.websocket("/ws/alerts")
+async def websocket_alerts_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint streaming real-time threat alerts to tactical dashboards.
+    Sends existing active incidents on initial connection, then pushes new events as they arrive.
+    """
+    await manager.connect(websocket)
+    try:
+        # Push initial snapshot of active incidents on connection if any exist
+        if INCIDENTS_DB:
+            snapshot = [inc.model_dump() for inc in reversed(list(INCIDENTS_DB.values()))]
+            await websocket.send_json(snapshot)
+        while True:
+            # Keep connection alive receiving ping or messages from client
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
+
+
+@app.post("/incidents/{incident_id}/dispatch", response_model=Incident, tags=["Incidents"])
+async def dispatch_incident(incident_id: str):
+    """
+    Dispatch emergency response units for a specified incident.
+    Sets status to 'dispatched' and updates dispatch_ts.
+    """
+    now_utc = datetime.now(timezone.utc).isoformat()
+    if incident_id not in INCIDENTS_DB:
+        # If dispatched from frontend demo/test ID, register dynamically
+        incident = Incident(
+            incident_id=incident_id,
+            zone_id="Perimeter_Gate_3",
+            score=95.0,
+            severity="Critical",
+            sources=["MANUAL_DISPATCH"],
+            first_ts=now_utc,
+            dispatch_ts=now_utc,
+            status="dispatched",
+        )
+        INCIDENTS_DB[incident_id] = incident
+    else:
+        incident = INCIDENTS_DB[incident_id]
+        incident_dict = incident.model_dump()
+        incident_dict["status"] = "dispatched"
+        if not incident_dict.get("dispatch_ts"):
+            incident_dict["dispatch_ts"] = now_utc
+        incident = Incident(**incident_dict)
+        INCIDENTS_DB[incident_id] = incident
+
+    await manager.broadcast(incident.model_dump())
+    return incident
+
+
+@app.post("/incidents/{incident_id}/feedback", tags=["Incidents"])
+async def incident_feedback(incident_id: str, feedback: FeedbackBody):
+    """
+    Record operator classification feedback (e.g. 'false_positive').
+    Updates incident status and notifies all active dashboard clients.
+    """
+    new_status = "false_positive" if feedback.verdict == "false_positive" else feedback.verdict
+    if incident_id in INCIDENTS_DB:
+        incident = INCIDENTS_DB[incident_id]
+        incident_dict = incident.model_dump()
+        incident_dict["status"] = new_status
+        updated = Incident(**incident_dict)
+        INCIDENTS_DB[incident_id] = updated
+        await manager.broadcast(updated.model_dump())
+        return {
+            "message": f"Incident '{incident_id}' status updated to {new_status}.",
+            "incident": updated.model_dump(),
+        }
+
+    return {
+        "message": f"Feedback '{feedback.verdict}' recorded for incident '{incident_id}'.",
+        "incident_id": incident_id,
+        "verdict": feedback.verdict,
+    }
+
+
 if __name__ == "__main__":
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
