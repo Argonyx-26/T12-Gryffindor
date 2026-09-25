@@ -146,9 +146,47 @@ class Incident(BaseModel):
         ge=0.0,
         description="Processing latency in milliseconds from first event to alert creation",
     )
-    status: Literal["open", "dispatched", "true_positive", "false_positive"] = Field(
+    status: str = Field(
         default="open",
-        description="Operational incident status: open, dispatched, true_positive, false_positive",
+        description="Operational incident status: DETECTED, CORRELATED, SCORED, open, dispatched, ACKNOWLEDGED, RESOLVED, true_positive, false_positive",
+    )
+    explanation: str = Field(
+        default="",
+        description="Human-readable explanation of why this incident triggered",
+    )
+    contributing_factors: List[str] = Field(
+        default_factory=list,
+        description="List of key suspicious factors driving the threat score",
+    )
+    score_breakdown: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Detailed score contribution breakdown per modality and multiplier",
+    )
+    confidence_summary: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Aggregated detection confidence across correlated events",
+    )
+    correlation_summary: str = Field(
+        default="",
+        description="Summary of correlated event sources and temporal window",
+    )
+    timeline: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Chronological event and system milestone log",
+    )
+    recommendations: List[str] = Field(
+        default_factory=list,
+        description="Non-executing tactical response recommendations for operators",
+    )
+    acknowledged_ts: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 timestamp when operator acknowledged the alert",
+    )
+    resolved_ts: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 timestamp when incident was resolved",
     )
     description: Optional[str] = Field(
         default=None,
@@ -186,16 +224,16 @@ class Incident(BaseModel):
             ) from e
         return v
 
-    @field_validator("dispatch_ts")
+    @field_validator("dispatch_ts", "acknowledged_ts", "resolved_ts")
     @classmethod
-    def validate_dispatch_ts(cls, v: Optional[str]) -> Optional[str]:
-        """Validate dispatch_ts when present; permits None or empty string as unset."""
+    def validate_optional_ts(cls, v: Optional[str]) -> Optional[str]:
+        """Validate optional timestamp fields when present; permits None or empty string as unset."""
         if v is None or v == "":
             return None
         try:
             datetime.fromisoformat(v.replace("Z", "+00:00"))
         except Exception as e:
             raise ValueError(
-                f"dispatch_ts '{v}' is not a valid ISO-8601 format."
+                f"Timestamp '{v}' is not a valid ISO-8601 format."
             ) from e
         return v
