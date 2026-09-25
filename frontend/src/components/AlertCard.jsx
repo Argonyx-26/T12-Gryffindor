@@ -24,41 +24,58 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
 
   /**
    * Helper function to return styling classes and icons tailored to the severity level.
+   * Color coding:
+   * - Critical: pulse/glow red
+   * - High: solid amber
+   * - Medium: solid yellow
+   * - Low: solid green
    */
   const getSeverityStyle = (level) => {
     switch (level) {
       case 'Critical':
         return {
-          badge: 'bg-red-950/80 text-red-400 border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.2)]',
-          dot: 'bg-red-500 animate-ping',
-          icon: <AlertCircle className="w-3.5 h-3.5 text-red-400" />,
-          scoreColor: 'text-red-500',
+          badge: 'bg-red-600 text-white font-extrabold border-red-400 shadow-[0_0_15px_rgba(239,68,68,0.7)] animate-pulse',
+          dot: 'bg-white animate-ping',
+          icon: <AlertCircle className="w-3.5 h-3.5 text-white" />,
+          scoreColor: 'text-red-500 font-extrabold drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
           accentBorder: 'border-l-red-500',
+          cardGlow: 'glow-critical bg-red-950/20 border-red-500/50',
+          selectedRing: 'ring-2 ring-red-500 shadow-[0_0_25px_rgba(239,68,68,0.35)]',
+          selectedPill: 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]',
         };
       case 'High':
         return {
-          badge: 'bg-amber-950/80 text-amber-400 border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.2)]',
-          dot: 'bg-amber-500',
-          icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />,
-          scoreColor: 'text-amber-400',
+          badge: 'bg-amber-500 text-slate-950 font-extrabold border-amber-300 shadow-md',
+          dot: 'bg-slate-950',
+          icon: <AlertTriangle className="w-3.5 h-3.5 text-slate-950 stroke-[2.5]" />,
+          scoreColor: 'text-amber-400 font-extrabold',
           accentBorder: 'border-l-amber-500',
+          cardGlow: 'bg-amber-950/15 border-amber-500/30 hover:border-amber-400/50',
+          selectedRing: 'ring-2 ring-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.3)]',
+          selectedPill: 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.9)]',
         };
       case 'Medium':
         return {
-          badge: 'bg-yellow-950/80 text-yellow-300 border-yellow-500/50',
-          dot: 'bg-yellow-400',
-          icon: <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />,
-          scoreColor: 'text-yellow-400',
-          accentBorder: 'border-l-yellow-500',
+          badge: 'bg-yellow-400 text-slate-950 font-extrabold border-yellow-200 shadow-md',
+          dot: 'bg-slate-950',
+          icon: <AlertTriangle className="w-3.5 h-3.5 text-slate-950 stroke-[2.5]" />,
+          scoreColor: 'text-yellow-400 font-extrabold',
+          accentBorder: 'border-l-yellow-400',
+          cardGlow: 'bg-yellow-950/10 border-yellow-500/30 hover:border-yellow-400/50',
+          selectedRing: 'ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.3)]',
+          selectedPill: 'bg-yellow-400 shadow-[0_0_10px_rgba(234,179,8,0.9)]',
         };
       case 'Low':
       default:
         return {
-          badge: 'bg-emerald-950/80 text-emerald-400 border-emerald-500/50',
-          dot: 'bg-emerald-400',
-          icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />,
-          scoreColor: 'text-emerald-400',
+          badge: 'bg-emerald-500 text-slate-950 font-extrabold border-emerald-300 shadow-md',
+          dot: 'bg-slate-950',
+          icon: <CheckCircle2 className="w-3.5 h-3.5 text-slate-950 stroke-[2.5]" />,
+          scoreColor: 'text-emerald-400 font-extrabold',
           accentBorder: 'border-l-emerald-500',
+          cardGlow: 'bg-emerald-950/10 border-emerald-500/30 hover:border-emerald-400/50',
+          selectedRing: 'ring-2 ring-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.3)]',
+          selectedPill: 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.9)]',
         };
     }
   };
@@ -146,11 +163,11 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
   return (
     <div
       onClick={() => onSelect(alert)}
-      className={`group relative p-4 rounded-lg cursor-pointer transition-all duration-200 border-l-4 ${style.accentBorder} ${
-        isFalsePositive ? 'opacity-60 bg-slate-950/40' : ''
+      className={`group relative p-4 rounded-lg cursor-pointer transition-all duration-300 border-l-4 ${style.accentBorder} ${style.cardGlow} animate-alert-enter ${
+        isFalsePositive ? 'opacity-50 grayscale-[30%]' : ''
       } ${
         isSelected
-          ? 'bg-slate-900/90 border-slate-700 ring-2 ring-red-500/60 shadow-[0_0_20px_rgba(239,68,68,0.15)]'
+          ? `${style.selectedRing} bg-slate-900/95`
           : 'bg-slate-900/60 hover:bg-slate-900/90 border-t border-r border-b border-slate-800 hover:border-slate-700'
       }`}
     >
@@ -262,7 +279,7 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
 
       {/* Selected Indicator Pill */}
       {isSelected && (
-        <div className="absolute -right-1 top-1/2 -translate-y-1/2 bg-red-500 w-1.5 h-8 rounded-l-full shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
+        <div className={`absolute -right-1 top-1/2 -translate-y-1/2 w-1.5 h-8 rounded-l-full ${style.selectedPill}`} />
       )}
     </div>
   );
