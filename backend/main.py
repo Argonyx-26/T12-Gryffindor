@@ -1,56 +1,68 @@
 """
-Main FastAPI application for Gryffindor - Intelligent Threat Detection & Situational Awareness System.
-Provides endpoints for event ingestion, real-time threat correlation, live alerting via WebSockets,
-temporal queries, and incident management.
+Main FastAPI application for Intelligent Threat Detection & Situational Awareness System.
+Provides endpoints for event ingestion, threat correlation, incident dispatch, and zone management.
 """
 
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+# pyrefly: ignore [missing-import]
+from fastapi import FastAPI, HTTPException, Query, status, WebSocket, WebSocketDisconnect
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+# pyrefly: ignore [missing-import]
 import uvicorn
 
-# Load environment variables
-load_dotenv()
+from backend.constants import (
+    CORRELATION_WINDOW_SECONDS,
+    CORROBORATION_MULTIPLIER,
+    SEVERITY_THRESHOLDS,
+    SOURCE_WEIGHTS,
+)
+from backend.models import Event, Incident
 
-# Safe imports for both package and direct execution
-try:
-    from backend.models import Event, Incident
-    from backend.constants import (
-        CORRELATION_WINDOW_SECONDS,
-        CORROBORATION_MULTIPLIER,
-        DEDUPLICATION_WINDOW_SECONDS,
-        INCIDENT_COOLDOWN_SECONDS,
-        SEVERITY_THRESHOLDS,
-        SOURCE_WEIGHTS,
-    )
-except ImportError:
-    from models import Event, Incident
-    from constants import (
-        CORRELATION_WINDOW_SECONDS,
-        CORROBORATION_MULTIPLIER,
-        DEDUPLICATION_WINDOW_SECONDS,
-        INCIDENT_COOLDOWN_SECONDS,
-        SEVERITY_THRESHOLDS,
-        SOURCE_WEIGHTS,
-    )
 
-# 1. Initialize FastAPI App
+# Feedback schema for operator action
+class FeedbackBody(BaseModel):
+    verdict: str = "false_positive"
+
+
+class ConnectionManager:
+    """Manages active WebSocket connections for live alert broadcasting."""
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: Any):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+
+manager = ConnectionManager()
+
+# Initialize FastAPI App
 app = FastAPI(
-    title="Gryffindor API",
-    description="Intelligent Threat Detection & Situational Awareness System - Multi-modal surveillance fusion engine combining CCTV, IoT sensors, and cyber access logs.",
+    title="Intelligent Threat Detection & Situational Awareness API",
+    description="Multi-modal surveillance fusion engine combining CCTV, IoT sensors, and cyber access logs.",
     version="1.0.0",
 )
 
-# Enable CORS for all origins
+# Enable CORS for frontend clients / dashboards
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,30 +71,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage
-event_store: List[Dict[str, Any]] = []
-incident_store: List[Incident] = []
-INCIDENTS_DB: Dict[str, Incident] = {}
+# In-memory storage for hackathon prototype
 ZONES_DB: Dict[str, Dict[str, Any]] = {}
+EVENTS_DB: List[Event] = []
+INCIDENTS_DB: Dict[str, Incident] = {}
 
 # Locate and load data/zones.json
 BASE_DIR = Path(__file__).resolve().parent.parent
 ZONES_FILE = BASE_DIR / "data" / "zones.json"
-if not ZONES_FILE.exists():
-    ZONES_FILE = Path("data") / "zones.json"
 
 
 def load_zones():
     """Load zones from data/zones.json into memory."""
     global ZONES_DB
     if ZONES_FILE.exists():
-        try:
-            with open(ZONES_FILE, "r", encoding="utf-8") as f:
-                zones_list = json.load(f)
-                ZONES_DB = {z["id"]: z for z in zones_list}
-        except Exception as e:
-            print(f"[WARNING] Failed to load zones from {ZONES_FILE}: {e}")
-            ZONES_DB = {}
+        with open(ZONES_FILE, "r", encoding="utf-8") as f:
+            zones_list = json.load(f)
+            ZONES_DB = {z["id"]: z for z in zones_list}
     else:
         ZONES_DB = {}
 
@@ -99,7 +104,7 @@ def parse_iso(ts_str: str) -> datetime:
     return dt
 
 
-def calculate_incident_severity(score: float) -> Literal["Critical", "High", "Medium", "Low"]:
+def calculate_incident_severity(score: float) -> str:
     """Classify incident severity according to defined thresholds."""
     if score >= SEVERITY_THRESHOLDS["Critical"]:
         return "Critical"
@@ -110,463 +115,155 @@ def calculate_incident_severity(score: float) -> Literal["Critical", "High", "Me
     return "Low"
 
 
-# ==============================================================================
-# WebSocket Connection Manager
-# ==============================================================================
-
-class ConnectionManager:
-    """Manages active WebSocket connections for live threat alert broadcasts."""
-
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: Any):
-        """Broadcast arbitrary JSON-serializable message or Incident."""
-        if not self.active_connections:
-            return
-        if hasattr(message, "model_dump_json"):
-            payload = message.model_dump_json()
-        elif hasattr(message, "model_dump"):
-            payload = json.dumps(message.model_dump())
-        elif isinstance(message, str):
-            payload = message
-        else:
-            payload = json.dumps(message)
-        disconnected: List[WebSocket] = []
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(payload)
-            except Exception:
-                disconnected.append(connection)
-        for dead_conn in disconnected:
-            self.disconnect(dead_conn)
-
-    async def broadcast_incident(self, incident: Incident):
-        """Immediately broadcast incident as JSON to all connected clients."""
-        await self.broadcast(incident)
-
-
-ws_manager = ConnectionManager()
-manager = ws_manager
-
-
-# ==============================================================================
-# Correlation Engine
-# ==============================================================================
-
-class CorrelationEngine:
+def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     """
-    Maintains a rolling buffer of recent events grouped by zone_id with arrival times.
-    Evaluates multi-source threat correlation across temporal windows and implements
-    incident de-duplication:
-    - If a new incident would trigger in the same zone within 5s of an existing OPEN incident,
-      the existing incident is updated with the higher score and appended event_ids.
-    - If an incident closed in that zone, new incidents in that zone are suppressed for 5s.
+    Correlate events occurring within CORRELATION_WINDOW_SECONDS in the same zone.
+
+    Key fix vs. the original version: instead of summing EVERY individual
+    correlated event (which let a burst of 10 same-source events like
+    failed logins blow the score past 100), we take ONE representative
+    event per DISTINCT source_type (the highest-confidence one) before
+    scoring. This means:
+      - 10 failed logins from CYBER alone still count as ONE CYBER signal.
+      - Only genuine corroboration across VIDEO / IOT / CYBER pushes the
+        score toward Critical.
+
+    We also merge into an existing open incident in the same zone (within
+    a short merge window) instead of creating a new incident every time,
+    and we suppress weak, single-source, low-severity noise entirely so
+    it doesn't clutter the dashboard.
     """
+    new_event_dt = parse_iso(new_event.timestamp)
 
-    def __init__(
-        self,
-        dedup_window_seconds: float = DEDUPLICATION_WINDOW_SECONDS,
-        cooldown_window_seconds: float = INCIDENT_COOLDOWN_SECONDS,
-    ):
-        # zone_id -> list of recent events, each with its arrival time
-        self.buffer: Dict[str, List[Dict[str, Any]]] = {}
-        # zone_id -> active open Incident
-        self.active_incidents: Dict[str, Incident] = {}
-        # zone_id -> epoch timestamp of last event processed for this incident
-        self.last_incident_time: Dict[str, float] = {}
-        # zone_id -> epoch timestamp when an incident in this zone was closed
-        self.last_closed_time: Dict[str, float] = {}
-        self.dedup_window_seconds: float = dedup_window_seconds
-        self.cooldown_window_seconds: float = cooldown_window_seconds
+    # 1. Find all events in the same zone within the correlation window.
+    correlated_events = [new_event]
+    for ev in reversed(EVENTS_DB):
+        if ev.event_id == new_event.event_id:
+            continue
+        if ev.zone_id != new_event.zone_id:
+            continue
+        ev_dt = parse_iso(ev.timestamp)
+        time_diff = abs((new_event_dt - ev_dt).total_seconds())
+        if time_diff <= CORRELATION_WINDOW_SECONDS:
+            correlated_events.append(ev)
 
-    @property
-    def rolling_buffer(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Alias property for rolling buffer access."""
-        return self.buffer
+    # 2. Collapse to ONE representative (max-confidence) event per source type.
+    best_per_source: Dict[str, Event] = {}
+    for ev in correlated_events:
+        current_best = best_per_source.get(ev.source_type)
+        if current_best is None or ev.confidence > current_best.confidence:
+            best_per_source[ev.source_type] = ev
 
-    def record_incident_closed(self, zone_id: str, close_time: Optional[Any] = None) -> None:
-        """
-        Record that an incident in zone_id has closed (e.g. dispatched, true_positive, false_positive).
-        Starts the cooldown timer during which new incidents in that zone cannot be started.
-        """
-        if close_time is None:
-            epoch = time.time()
-        elif isinstance(close_time, (int, float)):
-            epoch = float(close_time)
-        elif isinstance(close_time, str):
-            try:
-                epoch = parse_iso(close_time).timestamp()
-            except Exception:
-                epoch = time.time()
-        elif isinstance(close_time, datetime):
-            epoch = close_time.timestamp()
-        else:
-            epoch = time.time()
+    distinct_sources = list(best_per_source.keys())
+    num_sources = len(distinct_sources)
+    multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
 
-        self.last_closed_time[zone_id] = epoch
-        self.active_incidents.pop(zone_id, None)
-        self.last_incident_time.pop(zone_id, None)
+    # 3. Zone criticality factor.
+    zone_info = ZONES_DB.get(new_event.zone_id, {})
+    zone_weight = float(zone_info.get("zone_weight", 1.0))
 
-    def record_incident_opened(self, incident: Incident, open_time: Optional[Any] = None) -> None:
-        """Register an open incident for its zone, clearing any cooldown timer."""
-        if open_time is None:
-            epoch = time.time()
-        elif isinstance(open_time, (int, float)):
-            epoch = float(open_time)
-        elif isinstance(open_time, str):
-            try:
-                epoch = parse_iso(open_time).timestamp()
-            except Exception:
-                epoch = time.time()
-        elif isinstance(open_time, datetime):
-            epoch = open_time.timestamp()
-        else:
-            epoch = time.time()
+    # 4. Score = sum(weight * confidence) per DISTINCT source, scaled by
+    #    corroboration multiplier and zone weight, capped at 100.
+    weighted_sum = sum(
+        SOURCE_WEIGHTS.get(src, 0.3) * ev.confidence
+        for src, ev in best_per_source.items()
+    )
+    final_score = round(
+        min(100.0, max(0.0, weighted_sum * 100.0 * multiplier * zone_weight)), 2
+    )
 
-        self.active_incidents[incident.zone_id] = incident
-        self.last_incident_time[incident.zone_id] = epoch
-        self.last_closed_time.pop(incident.zone_id, None)
+    all_event_ids = [e.event_id for e in correlated_events]
+    first_event = min(correlated_events, key=lambda e: parse_iso(e.timestamp))
+    now_utc = datetime.now(timezone.utc)
+    first_dt = parse_iso(first_event.timestamp)
+    latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
+    severity = calculate_incident_severity(final_score)
 
-    def reset(self) -> None:
-        """Clear all rolling buffers, active incidents, and cooldown timers."""
-        self.buffer.clear()
-        self.active_incidents.clear()
-        self.last_incident_time.clear()
-        self.last_closed_time.clear()
+    # 5. Merge into an existing open/dispatched incident in this zone if one
+    #    started within the last few seconds, instead of duplicating alerts.
+    MERGE_WINDOW_SECONDS = 5.0
+    existing_incident = None
+    for inc in INCIDENTS_DB.values():
+        if inc.zone_id != new_event.zone_id:
+            continue
+        if inc.status not in ("open", "dispatched"):
+            continue
+        inc_first_dt = parse_iso(inc.first_ts)
+        if abs((new_event_dt - inc_first_dt).total_seconds()) <= MERGE_WINDOW_SECONDS:
+            existing_incident = inc
+            break
 
-    def add_event(self, event_data: Dict[str, Any], arrival_time: Optional[float] = None) -> None:
-        """Add an event to the rolling buffer for its zone and prune stale entries."""
-        zone_id = event_data.get("zone_id")
-        if not zone_id:
-            return
-        if zone_id not in self.buffer:
-            self.buffer[zone_id] = []
+    if existing_incident:
+        merged_event_ids = list(set(existing_incident.event_ids) | set(all_event_ids))
+        updated_score = max(existing_incident.score, final_score)
+        updated_severity = calculate_incident_severity(updated_score)
+        merged_sources = list(set(existing_incident.sources) | set(distinct_sources))
 
-        arr_time = arrival_time if arrival_time is not None else time.time()
-        entry = dict(event_data)
-        entry["arrival_time"] = arr_time
-        entry["event"] = event_data
-        self.buffer[zone_id].append(entry)
+        incident_dict = existing_incident.model_dump()
+        incident_dict["score"] = updated_score
+        incident_dict["severity"] = updated_severity
+        incident_dict["sources"] = merged_sources
+        incident_dict["event_ids"] = merged_event_ids
+        incident_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
+        if updated_severity in ("Critical", "High") and not incident_dict.get("dispatch_ts"):
+            incident_dict["dispatch_ts"] = now_utc.isoformat()
+            incident_dict["status"] = "dispatched"
 
-        # Retain events in rolling buffer for at least 300 seconds to prevent memory leaks
-        cutoff = arr_time - 300.0
-        self.buffer[zone_id] = [e for e in self.buffer[zone_id] if e.get("arrival_time", arr_time) >= cutoff]
+        updated_incident = Incident(**incident_dict)
+        INCIDENTS_DB[updated_incident.incident_id] = updated_incident
+        return updated_incident
 
-    def correlate(self, new_event_data: Dict[str, Any]) -> Incident:
-        """
-        Evaluate correlation for a newly arrived event against other events in the same zone.
-        Computes threat score, severity, and synthesizes an Incident.
-        """
-        zone_id = new_event_data["zone_id"]
-        new_event_dt = parse_iso(new_event_data["timestamp"])
+    # 6. Suppress weak, uncorroborated single-source noise entirely — this
+    #    is what drives your "noise suppression" metric.
+    if num_sources < 2 and severity == "Low":
+        return None
 
-        # Look at all OTHER events in the same zone_id that arrived within CORRELATION_WINDOW_SECONDS
-        # before or after this event's timestamp
-        zone_events = self.buffer.get(zone_id, [])
-        correlated_others: List[Dict[str, Any]] = []
-        seen_event_ids = {new_event_data.get("event_id")}
+    # 7. Otherwise, create a brand-new incident.
+    incident = Incident(
+        incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
+        zone_id=new_event.zone_id,
+        score=final_score,
+        severity=severity,
+        sources=distinct_sources,
+        event_ids=all_event_ids,
+        first_ts=first_event.timestamp,
+        dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
+        latency_ms=latency_ms if latency_ms >= 0 else 0.0,
+        status="dispatched" if severity in ["Critical", "High"] else "open",
+    )
 
-        for ev in zone_events:
-            ev_id = ev.get("event_id")
-            if ev_id == new_event_data.get("event_id") or ev_id in seen_event_ids:
-                continue
-            ev_dt = parse_iso(ev["timestamp"])
-            time_diff = abs((new_event_dt - ev_dt).total_seconds())
-            if time_diff <= CORRELATION_WINDOW_SECONDS:
-                correlated_others.append(ev)
-                seen_event_ids.add(ev_id)
+    INCIDENTS_DB[incident.incident_id] = incident
+    return incident
 
-        # Full group of correlated events including the new event
-        group = [new_event_data] + correlated_others
-
-        # Count distinct source_types present among this group (1, 2, or 3)
-        distinct_sources = list(dict.fromkeys(ev["source_type"] for ev in group))
-        distinct_source_count = len(distinct_sources)
-
-        # Calculate threat score:
-        # score = min(100, sum(SOURCE_WEIGHTS[source_type] * event.confidence) * CORROBORATION_MULTIPLIER * 100)
-        base_sum = sum(
-            SOURCE_WEIGHTS.get(ev["source_type"], 0.3) * float(ev.get("confidence", 1.0))
-            for ev in group
-        )
-        multiplier = CORROBORATION_MULTIPLIER.get(min(distinct_source_count, 3), 1.0)
-        raw_score = base_sum * multiplier * 100.0
-        score = round(min(100.0, max(0.0, raw_score)), 2)
-
-        # Determine severity according to thresholds
-        severity = calculate_incident_severity(score)
-
-        # Earliest event's timestamp
-        first_event = min(group, key=lambda ev: parse_iso(ev["timestamp"]))
-        first_ts = first_event["timestamp"]
-
-        # Latency calculated as (current server time - the new event's ingest_ts) in milliseconds
-        now_dt = datetime.now(timezone.utc)
-        ingest_ts_str = new_event_data.get("ingest_ts")
-        if ingest_ts_str:
-            try:
-                ingest_dt = parse_iso(ingest_ts_str)
-                latency_ms = round(max(0.0, (now_dt - ingest_dt).total_seconds() * 1000.0), 2)
-            except Exception:
-                latency_ms = 0.0
-        else:
-            latency_ms = 0.0
-
-        incident = Incident(
-            incident_id=str(uuid.uuid4()),
-            zone_id=zone_id,
-            score=score,
-            severity=severity,
-            sources=distinct_sources,
-            event_ids=[ev["event_id"] for ev in group],
-            first_ts=first_ts,
-            dispatch_ts=None,
-            latency_ms=latency_ms,
-            status="open",
-        )
-        return incident
-
-    def process_event(self, new_event_data: Dict[str, Any]) -> Optional[Incident]:
-        """
-        Process an incoming event with multi-source correlation and incident de-duplication:
-        - If an incident closed in the same zone within cooldown_window_seconds (5s), suppress creating a new incident.
-        - If an OPEN incident exists in the same zone within dedup_window_seconds (5s):
-            - Update its score to the higher of the two scores.
-            - Update its severity accordingly.
-            - Add the new event_id to its events list.
-            - Merge any new source modalities.
-            - Return the updated incident for re-broadcasting.
-        - Otherwise, start a genuinely new incident if 5 seconds have passed since the last one closed,
-          or if it's a different zone.
-        """
-        zone_id = new_event_data.get("zone_id")
-        if not zone_id:
-            return None
-
-        # Determine event epoch timestamp
-        ts_str = new_event_data.get("timestamp")
-        if ts_str:
-            try:
-                event_epoch = parse_iso(ts_str).timestamp()
-            except Exception:
-                event_epoch = time.time()
-        else:
-            event_epoch = time.time()
-
-        # 1. Check cooldown: Has an incident closed in this zone within 5 seconds?
-        # Only start a genuinely new incident if 5 seconds have passed since the last one closed in that zone, or if it's a different zone.
-        if zone_id in self.last_closed_time:
-            closed_epoch = self.last_closed_time[zone_id]
-            time_since_closed = event_epoch - closed_epoch
-            if 0.0 <= time_since_closed < self.cooldown_window_seconds or abs(time_since_closed) < self.cooldown_window_seconds:
-                # Suppress incident creation during cooldown
-                self.add_event(new_event_data)
-                return None
-            else:
-                # Cooldown expired (5 seconds have passed since last one closed)
-                self.last_closed_time.pop(zone_id, None)
-
-        # 2. Check de-duplication against existing OPEN incident in the same zone
-        existing_incident = self.active_incidents.get(zone_id)
-        if existing_incident is not None:
-            # Check if incident status in INCIDENTS_DB was modified externally to non-open
-            db_inc = INCIDENTS_DB.get(existing_incident.incident_id)
-            if db_inc is not None and db_inc.status != "open":
-                self.record_incident_closed(zone_id, close_time=event_epoch)
-                # Re-check cooldown after recognizing external closure
-                if abs(event_epoch - self.last_closed_time.get(zone_id, 0)) < self.cooldown_window_seconds:
-                    self.add_event(new_event_data)
-                    return None
-                existing_incident = None
-
-        if existing_incident is not None and existing_incident.status == "open":
-            last_epoch = self.last_incident_time.get(zone_id, event_epoch)
-            time_diff = abs(event_epoch - last_epoch)
-            if time_diff <= self.dedup_window_seconds:
-                # Within 5 seconds of an existing OPEN incident in the same zone!
-                # Update existing incident: higher score, add event_id, merge sources
-                candidate = self.correlate(new_event_data)
-                higher_score = round(max(existing_incident.score, candidate.score), 2)
-                higher_severity = calculate_incident_severity(higher_score)
-
-                # Add new event_id to events list (avoid duplicates)
-                merged_event_ids = list(existing_incident.event_ids)
-                new_eid = new_event_data.get("event_id")
-                if new_eid and new_eid not in merged_event_ids:
-                    merged_event_ids.append(new_eid)
-                for eid in candidate.event_ids:
-                    if eid not in merged_event_ids:
-                        merged_event_ids.append(eid)
-
-                # Merge sources
-                merged_sources = list(existing_incident.sources)
-                for src in candidate.sources:
-                    if src not in merged_sources:
-                        merged_sources.append(src)
-                src_type = new_event_data.get("source_type")
-                if src_type and src_type not in merged_sources:
-                    merged_sources.append(src_type)
-
-                # Latency update (if ingest_ts is present)
-                now_dt = datetime.now(timezone.utc)
-                ingest_ts_str = new_event_data.get("ingest_ts")
-                if ingest_ts_str:
-                    try:
-                        ingest_dt = parse_iso(ingest_ts_str)
-                        latency_ms = round(max(0.0, (now_dt - ingest_dt).total_seconds() * 1000.0), 2)
-                    except Exception:
-                        latency_ms = existing_incident.latency_ms
-                else:
-                    latency_ms = existing_incident.latency_ms
-
-                updated_incident = existing_incident.model_copy(
-                    update={
-                        "score": higher_score,
-                        "severity": higher_severity,
-                        "event_ids": merged_event_ids,
-                        "sources": merged_sources,
-                        "latency_ms": latency_ms,
-                    }
-                )
-                self.active_incidents[zone_id] = updated_incident
-                self.last_incident_time[zone_id] = event_epoch
-                self.add_event(new_event_data)
-                return updated_incident
-
-        # 3. Check if this candidate qualifies to create a new visible incident:
-        # EITHER (a) two or more distinct source_types corroborate within the correlation window,
-        # OR (b) a single source's score alone is above the "Medium" threshold from SEVERITY_THRESHOLDS.
-        candidate = self.correlate(new_event_data)
-        is_multi_source = len(candidate.sources) >= 2
-        is_above_medium = candidate.score >= SEVERITY_THRESHOLDS["Medium"]
-
-        if not (is_multi_source or is_above_medium):
-            # Single-source, low-confidence event (like one lone door sensor trigger or one lone failed login).
-            # Logged internally to event_store and added to rolling buffer, but does NOT create or broadcast an incident.
-            self.add_event(new_event_data)
-            return None
-
-        # Genuinely new incident (qualifies via (a) or (b))
-        new_incident = candidate
-        self.active_incidents[zone_id] = new_incident
-        self.last_incident_time[zone_id] = event_epoch
-        self.last_closed_time.pop(zone_id, None)
-        self.add_event(new_event_data)
-        return new_incident
-
-
-engine = CorrelationEngine()
-
-
-def evaluate_threat_correlation(new_event_dict: Dict[str, Any]) -> Incident:
-    """Wrapper function preserving backwards compatibility."""
-    return engine.correlate(new_event_dict)
-
-
-# ==============================================================================
-# Request Models
-# ==============================================================================
-
-class FeedbackRequest(BaseModel):
-    """Schema for operator feedback on an incident."""
-    verdict: Literal["true_positive", "false_positive", "open", "dispatched"] = "false_positive"
-
-
-FeedbackBody = FeedbackRequest
-
-
-# ==============================================================================
-# API Endpoints
-# ==============================================================================
 
 @app.get("/", tags=["System"])
 def root():
-    """Root endpoint indicating server health and operational status."""
-    return {"message": "Gryffindor backend is running"}
+    """Health check and high-level system metrics overview."""
+    return {
+        "status": "online",
+        "service": "Intelligent Threat Detection & Situational Awareness System",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "stats": {
+            "monitored_zones": len(ZONES_DB),
+            "ingested_events": len(EVENTS_DB),
+            "active_incidents": len(INCIDENTS_DB),
+        },
+        "docs_url": "/docs",
+    }
 
 
 @app.get("/time", tags=["System"])
 def get_time():
-    """
-    Returns current server time as a unix epoch timestamp float.
-    Used for clock synchronization across distributed nodes and frontends.
-    """
-    return {"epoch": time.time()}
+    """Returns current server epoch time, used for clock sync between laptops."""
+    return {"epoch": datetime.now(timezone.utc).timestamp()}
 
 
-@app.post("/ingest", status_code=status.HTTP_200_OK, tags=["Events"])
-async def ingest_event(event: Event):
-    """
-    Ingest a security observation event from CCTV, IoT sensors, or cyber logs.
-    - Validates payload structure automatically using the Event Pydantic model
-    - Appends server-side UTC ingest_ts
-    - Logs the event payload to console
-    - Stores the event in-memory within event_store
-    - Runs multi-source threat correlation via CorrelationEngine with de-duplication
-    - Stores synthesized Incident in incident_store (or updates existing incident in-place)
-    - Broadcasts the Incident to all connected WebSocket clients on /ws/alerts
-    - Returns acknowledgment JSON with event_id
-    """
-    # 1. Server-side UTC ingest timestamp
-    ingest_ts = datetime.now(timezone.utc).isoformat()
-    event_data = event.model_dump()
-    event_data["ingest_ts"] = ingest_ts
-
-    # 2. Print received event to console
-    print(f"\n[EVENT INGESTED] ID: {event.event_id} | Type: {event.event_type} | Source: {event.source_type} | Zone: {event.zone_id}")
-    print(json.dumps(event_data, indent=2))
-
-    # 3. Store in Python list in-memory
-    event_store.append(event_data)
-
-    # 4. Trigger threat correlation & de-duplication
-    incident = engine.process_event(event_data)
-    if incident is not None:
-        if incident.incident_id in INCIDENTS_DB:
-            # Existing incident updated via de-duplication: update in-place
-            INCIDENTS_DB[incident.incident_id] = incident
-            for idx, inc in enumerate(incident_store):
-                if inc.incident_id == incident.incident_id:
-                    incident_store[idx] = incident
-                    break
-        else:
-            # Genuinely new incident created
-            incident_store.append(incident)
-            INCIDENTS_DB[incident.incident_id] = incident
-
-        # 5. Broadcast or re-broadcast incident immediately to all WebSocket clients
-        try:
-            await ws_manager.broadcast_incident(incident)
-        except Exception as err:
-            print(f"[WEBSOCKET BROADCAST ERROR] {err}")
-
-    # 6. Return JSON response
-    return {
-        "status": "received",
-        "event_id": event.event_id,
-        "incident_id": incident.incident_id if incident else None,
-    }
-
-
-@app.post("/events", status_code=status.HTTP_200_OK, tags=["Events"], include_in_schema=False)
-async def ingest_event_alias(event: Event):
-    """Compatibility alias endpoint for /ingest."""
-    return await ingest_event(event)
-
-
-@app.get("/events", response_model=List[Dict[str, Any]], tags=["Events"])
-def get_events():
-    """Returns all events currently stored in event_store, ordered most recent first."""
-    return list(reversed(event_store))
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Clears all in-memory events and incidents. Useful between demo runs."""
+    EVENTS_DB.clear()
+    INCIDENTS_DB.clear()
+    return {"message": "System state reset.", "events": 0, "incidents": 0}
 
 
 @app.get("/zones", tags=["Zones"])
@@ -575,27 +272,48 @@ def get_zones():
     return list(ZONES_DB.values())
 
 
-@app.websocket("/ws/alerts")
-async def websocket_alerts(websocket: WebSocket):
+@app.post("/events", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
+@app.post("/ingest", response_model=Dict[str, Any], status_code=status.HTTP_201_CREATED, tags=["Events"])
+async def ingest_event(event: Event):
     """
-    WebSocket endpoint for streaming real-time security alerts and incidents.
-    Broadcasts each synthesized Incident to connected clients as JSON.
-    Handles disconnections gracefully without crashing the server.
+    Ingest a real-time event from CCTV, IoT, or Cyber sources.
+    Performs validation and runs immediate multi-source threat correlation.
     """
-    await ws_manager.connect(websocket)
-    try:
-        # Push initial snapshot of active incidents on connection if any exist
-        if incident_store or INCIDENTS_DB:
-            incidents_to_send = list(reversed(incident_store)) if incident_store else list(reversed(list(INCIDENTS_DB.values())))
-            snapshot = [inc.model_dump() for inc in incidents_to_send]
-            await websocket.send_text(json.dumps(snapshot))
-        while True:
-            # Keep connection open and accept any incoming client keep-alives
-            await websocket.receive_text()
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
-        ws_manager.disconnect(websocket)
+    # Prevent duplicate event IDs
+    if any(e.event_id == event.event_id for e in EVENTS_DB):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Event with id '{event.event_id}' already exists.",
+        )
+
+    # Store event
+    EVENTS_DB.append(event)
+
+    # Run multi-source threat correlation
+    incident = evaluate_threat_correlation(event)
+    if incident:
+        await manager.broadcast(incident.model_dump())
+
+    return {
+        "message": "Event ingested and processed successfully.",
+        "event_id": event.event_id,
+        "triggered_incident": incident.model_dump() if incident else None,
+    }
+
+
+@app.get("/events", response_model=List[Event], tags=["Events"])
+def list_events(
+    zone_id: Optional[str] = Query(None, description="Filter by zone ID"),
+    source_type: Optional[str] = Query(None, description="Filter by source modality"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """List recent events with optional filtering."""
+    results = EVENTS_DB
+    if zone_id:
+        results = [e for e in results if e.zone_id == zone_id]
+    if source_type:
+        results = [e for e in results if e.source_type == source_type]
+    return results[-limit:]
 
 
 @app.get("/incidents", response_model=List[Incident], tags=["Incidents"])
@@ -603,8 +321,8 @@ def list_incidents(
     severity: Optional[str] = Query(None, description="Filter by severity level"),
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by incident status"),
 ):
-    """Retrieve all synthesized threat incidents, ordered most recent first."""
-    incidents = list(reversed(incident_store))
+    """Retrieve all synthesized threat incidents."""
+    incidents = list(INCIDENTS_DB.values())
     if severity:
         incidents = [inc for inc in incidents if inc.severity == severity]
     if status_filter:
@@ -615,214 +333,144 @@ def list_incidents(
 @app.get("/incidents/{incident_id}", response_model=Incident, tags=["Incidents"])
 def get_incident(incident_id: str):
     """Fetch details of a specific incident."""
-    for inc in reversed(incident_store):
-        if inc.incident_id == incident_id:
-            return inc
-    if incident_id in INCIDENTS_DB:
-        return INCIDENTS_DB[incident_id]
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Incident '{incident_id}' not found.",
-    )
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    return INCIDENTS_DB[incident_id]
 
 
 @app.patch("/incidents/{incident_id}/status", response_model=Incident, tags=["Incidents"])
-async def update_incident_status(
+def update_incident_status(
     incident_id: str,
     new_status: str = Query(..., pattern="^(open|dispatched|true_positive|false_positive)$"),
 ):
-    """Update incident status (compatibility endpoint)."""
-    now_iso = datetime.now(timezone.utc).isoformat()
-    now_epoch = time.time()
-    for idx, inc in enumerate(incident_store):
-        if inc.incident_id == incident_id:
-            dispatch_ts = now_iso if new_status == "dispatched" and not inc.dispatch_ts else inc.dispatch_ts
-            updated_inc = inc.model_copy(update={"status": new_status, "dispatch_ts": dispatch_ts})
-            incident_store[idx] = updated_inc
-            INCIDENTS_DB[incident_id] = updated_inc
-            if new_status != "open":
-                engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-            else:
-                engine.record_incident_opened(updated_inc, open_time=now_epoch)
-            await ws_manager.broadcast_incident(updated_inc)
-            return updated_inc
+    """Update incident status (e.g., mark as true_positive or dispatched)."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    incident_dict = incident.model_dump()
+    incident_dict["status"] = new_status
+    if new_status == "dispatched" and not incident_dict.get("dispatch_ts"):
+        incident_dict["dispatch_ts"] = datetime.now(timezone.utc).isoformat()
+    updated_incident = Incident(**incident_dict)
+    INCIDENTS_DB[incident_id] = updated_incident
+    return updated_incident
 
-    if incident_id in INCIDENTS_DB:
-        inc = INCIDENTS_DB[incident_id]
-        dispatch_ts = now_iso if new_status == "dispatched" and not inc.dispatch_ts else inc.dispatch_ts
-        updated_inc = inc.model_copy(update={"status": new_status, "dispatch_ts": dispatch_ts})
-        INCIDENTS_DB[incident_id] = updated_inc
-        incident_store.append(updated_inc)
-        if new_status != "open":
-            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-        else:
-            engine.record_incident_opened(updated_inc, open_time=now_epoch)
-        await ws_manager.broadcast_incident(updated_inc)
-        return updated_inc
 
-    # Dynamic fallback for demo / test / mock incidents
-    updated_inc = Incident(
-        incident_id=incident_id,
-        zone_id="Perimeter_Gate_3",
-        score=95.0 if new_status == "dispatched" else 40.0,
-        severity="Critical" if new_status == "dispatched" else "Medium",
-        sources=["OPERATOR_ACTION"],
-        first_ts=now_iso,
-        dispatch_ts=now_iso if new_status == "dispatched" else None,
-        status=new_status,
-    )
-    INCIDENTS_DB[incident_id] = updated_inc
-    incident_store.append(updated_inc)
-    if new_status != "open":
-        engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """
+    Returns headline demo metrics: total events, total incidents,
+    noise suppression percentage, and average incident latency.
+    """
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    if total_events > 0:
+        suppression_pct = round(
+            (1 - (total_incidents / total_events)) * 100.0, 2
+        )
     else:
-        engine.record_incident_opened(updated_inc, open_time=now_epoch)
-    await ws_manager.broadcast_incident(updated_inc)
-    return updated_inc
+        suppression_pct = 0.0
+
+    if total_incidents > 0:
+        avg_latency_ms = round(
+            sum(inc.latency_ms for inc in INCIDENTS_DB.values()) / total_incidents, 2
+        )
+    else:
+        avg_latency_ms = 0.0
+
+    return {
+        "total_events": total_events,
+        "total_incidents": total_incidents,
+        "noise_suppression_pct": suppression_pct,
+        "avg_latency_ms": avg_latency_ms,
+    }
+
+
+@app.websocket("/ws/alerts")
+async def websocket_alerts_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint streaming real-time threat alerts to tactical dashboards.
+    Sends existing active incidents on initial connection, then pushes new events as they arrive.
+    """
+    await manager.connect(websocket)
+    try:
+        # Push initial snapshot of active incidents on connection if any exist
+        if INCIDENTS_DB:
+            snapshot = [inc.model_dump() for inc in reversed(list(INCIDENTS_DB.values()))]
+            await websocket.send_json(snapshot)
+        while True:
+            # Keep connection alive receiving ping or messages from client
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception:
+        manager.disconnect(websocket)
 
 
 @app.post("/incidents/{incident_id}/dispatch", response_model=Incident, tags=["Incidents"])
 async def dispatch_incident(incident_id: str):
     """
-    Sets the incident's status to 'dispatched' and dispatch_ts to current server time.
+    Dispatch emergency response units for a specified incident.
+    Sets status to 'dispatched' and updates dispatch_ts.
     """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    now_epoch = time.time()
-    for idx, inc in enumerate(incident_store):
-        if inc.incident_id == incident_id:
-            updated_inc = inc.model_copy(update={"status": "dispatched", "dispatch_ts": now_iso})
-            incident_store[idx] = updated_inc
-            INCIDENTS_DB[incident_id] = updated_inc
-            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-            await ws_manager.broadcast_incident(updated_inc)
-            return updated_inc
+    now_utc = datetime.now(timezone.utc).isoformat()
+    if incident_id not in INCIDENTS_DB:
+        # If dispatched from frontend demo/test ID, register dynamically
+        incident = Incident(
+            incident_id=incident_id,
+            zone_id="Perimeter_Gate_3",
+            score=95.0,
+            severity="Critical",
+            sources=["MANUAL_DISPATCH"],
+            first_ts=now_utc,
+            dispatch_ts=now_utc,
+            status="dispatched",
+        )
+        INCIDENTS_DB[incident_id] = incident
+    else:
+        incident = INCIDENTS_DB[incident_id]
+        incident_dict = incident.model_dump()
+        incident_dict["status"] = "dispatched"
+        if not incident_dict.get("dispatch_ts"):
+            incident_dict["dispatch_ts"] = now_utc
+        incident = Incident(**incident_dict)
+        INCIDENTS_DB[incident_id] = incident
 
-    if incident_id in INCIDENTS_DB:
-        inc = INCIDENTS_DB[incident_id]
-        updated_inc = inc.model_copy(update={"status": "dispatched", "dispatch_ts": now_iso})
-        INCIDENTS_DB[incident_id] = updated_inc
-        incident_store.append(updated_inc)
-        engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-        await ws_manager.broadcast_incident(updated_inc)
-        return updated_inc
-
-    # Dynamic fallback for demo / test / mock incidents
-    incident = Incident(
-        incident_id=incident_id,
-        zone_id="Perimeter_Gate_3",
-        score=95.0,
-        severity="Critical",
-        sources=["MANUAL_DISPATCH"],
-        first_ts=now_iso,
-        dispatch_ts=now_iso,
-        status="dispatched",
-    )
-    INCIDENTS_DB[incident_id] = incident
-    incident_store.append(incident)
-    engine.record_incident_closed(incident.zone_id, close_time=now_epoch)
-    await ws_manager.broadcast_incident(incident)
+    await manager.broadcast(incident.model_dump())
     return incident
 
 
-@app.post("/incidents/{incident_id}/feedback", response_model=Incident, tags=["Incidents"])
-async def submit_incident_feedback(incident_id: str, feedback: FeedbackRequest):
+@app.post("/incidents/{incident_id}/feedback", tags=["Incidents"])
+async def incident_feedback(incident_id: str, feedback: FeedbackBody):
     """
-    Accepts a JSON body {"verdict": "true_positive" or "false_positive"} and updates
-    that incident's status accordingly.
+    Record operator classification feedback (e.g. 'false_positive').
+    Updates incident status and notifies all active dashboard clients.
     """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    now_epoch = time.time()
-    for idx, inc in enumerate(incident_store):
-        if inc.incident_id == incident_id:
-            updated_inc = inc.model_copy(update={"status": feedback.verdict})
-            incident_store[idx] = updated_inc
-            INCIDENTS_DB[incident_id] = updated_inc
-            if feedback.verdict != "open":
-                engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-            else:
-                engine.record_incident_opened(updated_inc, open_time=now_epoch)
-            await ws_manager.broadcast_incident(updated_inc)
-            return updated_inc
-
+    new_status = "false_positive" if feedback.verdict == "false_positive" else feedback.verdict
     if incident_id in INCIDENTS_DB:
-        inc = INCIDENTS_DB[incident_id]
-        updated_inc = inc.model_copy(update={"status": feedback.verdict})
-        INCIDENTS_DB[incident_id] = updated_inc
-        incident_store.append(updated_inc)
-        if feedback.verdict != "open":
-            engine.record_incident_closed(updated_inc.zone_id, close_time=now_epoch)
-        else:
-            engine.record_incident_opened(updated_inc, open_time=now_epoch)
-        await ws_manager.broadcast_incident(updated_inc)
-        return updated_inc
-
-    # Dynamic fallback for demo / test / mock incidents
-    incident = Incident(
-        incident_id=incident_id,
-        zone_id="Perimeter_Gate_3",
-        score=45.0,
-        severity="Medium",
-        sources=["OPERATOR_FEEDBACK"],
-        first_ts=now_iso,
-        dispatch_ts=None,
-        status=feedback.verdict,
-    )
-    INCIDENTS_DB[incident_id] = incident
-    incident_store.append(incident)
-    if feedback.verdict != "open":
-        engine.record_incident_closed(incident.zone_id, close_time=now_epoch)
-    else:
-        engine.record_incident_opened(incident, open_time=now_epoch)
-    await ws_manager.broadcast_incident(incident)
-    return incident
-
-
-@app.post("/reset", tags=["System"])
-def reset_system_state():
-    """Reset all events, incidents, and correlation engine state."""
-    event_store.clear()
-    incident_store.clear()
-    INCIDENTS_DB.clear()
-    engine.reset()
-    return {"status": "reset", "message": "All incidents, events, and engine buffers cleared."}
-
-
-@app.get("/metrics", tags=["Metrics"])
-def get_metrics():
-    """
-    Returns operational threat detection metrics:
-    - total events received
-    - total incidents created
-    - percentage of events that did NOT result in an incident (noise suppression rate)
-    - average latency_ms across all incidents
-    """
-    total_events = len(event_store)
-    total_incidents = len(incident_store)
-
-    if total_events > 0:
-        events_without_incident = max(0, total_events - total_incidents)
-        noise_suppression_rate = round((events_without_incident / total_events) * 100.0, 2)
-    else:
-        events_without_incident = 0
-        noise_suppression_rate = 0.0
-
-    if total_incidents > 0:
-        avg_latency = round(sum(inc.latency_ms for inc in incident_store) / total_incidents, 2)
-    else:
-        avg_latency = 0.0
+        incident = INCIDENTS_DB[incident_id]
+        incident_dict = incident.model_dump()
+        incident_dict["status"] = new_status
+        updated = Incident(**incident_dict)
+        INCIDENTS_DB[incident_id] = updated
+        await manager.broadcast(updated.model_dump())
+        return {
+            "message": f"Incident '{incident_id}' status updated to {new_status}.",
+            "incident": updated.model_dump(),
+        }
 
     return {
-        "total_events": total_events,
-        "total_events_received": total_events,
-        "total_incidents": total_incidents,
-        "total_incidents_created": total_incidents,
-        "events_without_incident": events_without_incident,
-        "noise_suppression_rate": noise_suppression_rate,
-        "average_latency_ms": avg_latency,
-        "avg_latency_ms": avg_latency,
+        "message": f"Feedback '{feedback.verdict}' recorded for incident '{incident_id}'.",
+        "incident_id": incident_id,
+        "verdict": feedback.verdict,
     }
 
 
 if __name__ == "__main__":
-    # Support running directly via python backend/main.py or python -m uvicorn
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True, app_dir=str(BASE_DIR))
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

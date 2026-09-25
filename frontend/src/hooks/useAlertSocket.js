@@ -16,6 +16,37 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 const DEFAULT_WS_URL = 'ws://localhost:8000/ws/alerts';
 const RECONNECT_DELAY_MS = 3000;
 
+/**
+ * Calculate incident synopsis label based on distinct source types:
+ * - Count DISTINCT source_types across all merged events / sources.
+ * - Use "Single-source detection: [source]" if only 1 distinct source_type.
+ * - Use "Corroborated multi-vector detection across: [sources]" if 2 or more distinct source_types.
+ */
+export function calculateSynopsis(sources, fallbackDescription) {
+  let distinctSources = [];
+  if (Array.isArray(sources)) {
+    distinctSources = Array.from(new Set(sources.filter(Boolean)));
+  }
+
+  if (distinctSources.length === 1) {
+    return `Single-source detection: ${distinctSources[0]}`;
+  } else if (distinctSources.length >= 2) {
+    return `Corroborated multi-vector detection across: ${distinctSources.join(', ')}`;
+  }
+
+  // Preserve existing custom description if provided (and not legacy generic templates)
+  if (
+    fallbackDescription &&
+    !fallbackDescription.startsWith('Corroborated multimodal detection across:') &&
+    !fallbackDescription.startsWith('Corroborated multi-vector detection across:') &&
+    !fallbackDescription.startsWith('Single-source detection:')
+  ) {
+    return fallbackDescription;
+  }
+
+  return fallbackDescription || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+}
+
 export function useAlertSocket(customUrl) {
   // Read WebSocket URL from environment variable or default
   const wsUrl = customUrl || import.meta.env.VITE_WS_URL || DEFAULT_WS_URL;
@@ -85,20 +116,31 @@ export function useAlertSocket(customUrl) {
       ];
     }
 
+    // Compute distinct source modalities across all contributing events / sources
+    let distinctSources = [];
+    if (Array.isArray(data.sources) && data.sources.length > 0) {
+      distinctSources = Array.from(new Set(data.sources.filter(Boolean)));
+    } else if (Array.isArray(data.events) && data.events.length > 0) {
+      distinctSources = Array.from(new Set(data.events.map(e => e.source_type || e.source).filter(Boolean)));
+    } else if (data.source_type) {
+      distinctSources = [data.source_type];
+    }
+
+    // Recalculate label: count DISTINCT source_types across all merged/contributing events
+    const description = calculateSynopsis(distinctSources, data.description);
+
     return {
+      ...data, // Preserve any additional backend fields
       incident_id,
       zone_id: data.zone_id || data.zone || 'Sector Unknown',
       score: typeof data.score === 'number' ? Math.round(data.score) : Number(data.score) || 0,
       severity,
       timestamp: formattedTimestamp,
       status: data.status || 'open',
-      description: data.description || (
-        data.sources ? `Corroborated multimodal detection across: ${data.sources.join(', ')}` :
-        'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.'
-      ),
+      sources: distinctSources.length > 0 ? distinctSources : (data.sources || []),
+      description,
       camera_id: data.camera_id || (data.zone_id ? `CAM-${String(data.zone_id).replace(/\s+/g, '-').slice(0, 10).toUpperCase()}` : 'CAM-PRIMARY'),
       correlated_events,
-      ...data, // Preserve any additional backend fields
     };
   }, []);
 
@@ -145,20 +187,90 @@ export function useAlertSocket(customUrl) {
           if (Array.isArray(rawData)) {
             const normalizedBatch = rawData.map(normalizeAlert).filter(Boolean);
             setAlerts((prevAlerts) => {
-              // Add new alerts to the TOP, avoiding duplicate IDs
-              const existingIds = new Set(prevAlerts.map(a => a.incident_id));
-              const freshAlerts = normalizedBatch.filter(a => !existingIds.has(a.incident_id));
-              return [...freshAlerts, ...prevAlerts];
+              const updated = [...prevAlerts];
+              const freshAlerts = [];
+
+              for (const norm of normalizedBatch) {
+                const existingIndex = updated.findIndex(a => a.incident_id === norm.incident_id);
+                if (existingIndex !== -1) {
+                  const existing = updated[existingIndex];
+                  const mergedSources = Array.from(new Set([
+                    ...(Array.isArray(existing.sources) ? existing.sources : []),
+                    ...(Array.isArray(norm.sources) ? norm.sources : [])
+                  ].filter(Boolean)));
+                  const mergedEventIds = Array.from(new Set([
+                    ...(Array.isArray(existing.event_ids) ? existing.event_ids : []),
+                    ...(Array.isArray(norm.event_ids) ? norm.event_ids : [])
+                  ].filter(Boolean)));
+                  const updatedDescription = calculateSynopsis(
+                    mergedSources,
+                    norm.description || existing.description
+                  );
+
+                  let updatedCorrelatedEvents = norm.correlated_events || existing.correlated_events;
+                  if (mergedEventIds.length > 0) {
+                    updatedCorrelatedEvents = mergedEventIds.map(
+                      (id, idx) => `Correlated sensor hit #${idx + 1} (Event ID: ${id})`
+                    );
+                  }
+
+                  updated[existingIndex] = {
+                    ...existing,
+                    ...norm,
+                    sources: mergedSources.length > 0 ? mergedSources : (norm.sources || existing.sources),
+                    event_ids: mergedEventIds.length > 0 ? mergedEventIds : (norm.event_ids || existing.event_ids),
+                    description: updatedDescription,
+                    correlated_events: updatedCorrelatedEvents,
+                  };
+                } else {
+                  freshAlerts.push(norm);
+                }
+              }
+              return [...freshAlerts, ...updated];
             });
           } else if (rawData && typeof rawData === 'object') {
             const normalized = normalizeAlert(rawData);
             if (normalized) {
               setAlerts((prevAlerts) => {
-                // If this alert already exists (e.g., status update broadcasted), update it
+                // If this alert already exists (e.g., de-duplication update or status change broadcasted), update it
                 const existingIndex = prevAlerts.findIndex(a => a.incident_id === normalized.incident_id);
                 if (existingIndex !== -1) {
                   const updated = [...prevAlerts];
-                  updated[existingIndex] = { ...updated[existingIndex], ...normalized };
+                  const existing = updated[existingIndex];
+
+                  // Count DISTINCT source_types across all merged events
+                  const mergedSources = Array.from(new Set([
+                    ...(Array.isArray(existing.sources) ? existing.sources : []),
+                    ...(Array.isArray(normalized.sources) ? normalized.sources : [])
+                  ].filter(Boolean)));
+
+                  const mergedEventIds = Array.from(new Set([
+                    ...(Array.isArray(existing.event_ids) ? existing.event_ids : []),
+                    ...(Array.isArray(normalized.event_ids) ? normalized.event_ids : [])
+                  ].filter(Boolean)));
+
+                  // Recalculate synopsis label the same way as a fresh incident:
+                  // "Single-source detection: [source]" if 1, "Corroborated multi-vector detection across: [sources]" if 2+
+                  const updatedDescription = calculateSynopsis(
+                    mergedSources,
+                    normalized.description || existing.description
+                  );
+
+                  let updatedCorrelatedEvents = normalized.correlated_events || existing.correlated_events;
+                  if (mergedEventIds.length > 0) {
+                    updatedCorrelatedEvents = mergedEventIds.map(
+                      (id, idx) => `Correlated sensor hit #${idx + 1} (Event ID: ${id})`
+                    );
+                  }
+
+                  updated[existingIndex] = {
+                    ...existing,
+                    ...normalized,
+                    sources: mergedSources.length > 0 ? mergedSources : (normalized.sources || existing.sources),
+                    event_ids: mergedEventIds.length > 0 ? mergedEventIds : (normalized.event_ids || existing.event_ids),
+                    description: updatedDescription,
+                    correlated_events: updatedCorrelatedEvents,
+                  };
                   return updated;
                 }
                 // Prepend new incoming alert to the TOP (most recent first)
