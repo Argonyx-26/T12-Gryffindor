@@ -16,11 +16,10 @@ import threading
 
 # Import the simulator modules (supports running from repo root or simulators directory)
 try:
-    import sensor_sim
-    import syslog_sim
+    from simulators import sensor_sim, syslog_sim
 except ImportError:
-    from simulators import sensor_sim
-    from simulators import syslog_sim
+    import sensor_sim  # pyright: ignore[reportMissingImports]
+    import syslog_sim  # pyright: ignore[reportMissingImports]
 
 # FastAPI hub configuration from environment variable with localhost fallback
 HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
