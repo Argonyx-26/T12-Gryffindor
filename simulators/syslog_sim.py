@@ -52,10 +52,6 @@ def emit_login_spike(zone_id: str, burst: int = 12, confidence: float = 0.9):
     force pattern), then emits a single login_spike anomaly event summarizing
     it — this is the event the backend's cyber vector actually scores on."""
     attacker_ips = random.sample(IPS, k=min(3, len(IPS)))
-    for _ in range(burst):
-        emit_login(zone_id, success=False, user="admin", src_ip=random.choice(attacker_ips))
-        time.sleep(0.05)
-
     z = _zscore(zone_id, burst)
     evt = make_event(
         source="syslog",
@@ -67,6 +63,11 @@ def emit_login_spike(zone_id: str, burst: int = 12, confidence: float = 0.9):
     ok = post_event(evt)
     print(f"[syslog_sim] login_spike zone={zone_id} zscore={z:.2f} -> {'OK' if ok else 'FAIL'}")
     _window[zone_id].append(burst)
+
+    for _ in range(burst):
+        emit_login(zone_id, success=False, user="admin", src_ip=random.choice(attacker_ips))
+        time.sleep(0.01)
+
     return evt
 
 

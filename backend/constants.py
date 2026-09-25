@@ -28,4 +28,47 @@ SEVERITY_THRESHOLDS: Dict[str, int] = {
 }
 
 # Temporal correlation window in seconds to cluster multi-source events into a single incident
-CORRELATION_WINDOW_SECONDS: float = 5.0
+CORRELATION_WINDOW_SECONDS: float = 1.5
+
+# Event risk profile weights per modality and event type
+# Values scale raw risk contributions while keeping baseline weights intact
+EVENT_RISK_PROFILES: Dict[str, Dict[str, float]] = {
+    "VIDEO": {
+        "person_detected": 0.50,
+        "vehicle_detected": 0.45,
+        "restricted_zone_entry": 0.90,
+        "tripwire_crossed": 0.95,
+        "loitering_detected": 0.80,
+        "crowd_detected": 0.70,
+        "object_left": 0.85,
+        "object_removed": 0.85,
+    },
+    "IOT": {
+        "door_open": 0.40,
+        "motion": 0.30,
+        "forced_entry": 0.95,
+        "sensor_tamper": 0.90,
+        "off_shift_access": 0.85,
+    },
+    "CYBER": {
+        "login_success": 0.10,
+        "login_failed": 0.35,
+        "login_spike": 0.90,
+        "unusual_login_time": 0.75,
+        "new_device": 0.65,
+        "privilege_change": 0.85,
+        "multiple_account_failures": 0.85,
+        "unusual_source": 0.75,
+    },
+}
+
+# Fallback base risk factor for unknown event types
+DEFAULT_EVENT_RISK: float = 0.50
+
+# Shift schedule configuration (start_hour, end_hour in UTC)
+DEFAULT_SHIFT_HOURS = (9, 18)
+OFF_SHIFT_MULTIPLIER: float = 1.4
+RESTRICTED_ZONE_MULTIPLIER: float = 1.35
+REPEATED_EVENT_BOOST: float = 1.15
+MAX_REPEATED_BOOST: float = 1.40
+

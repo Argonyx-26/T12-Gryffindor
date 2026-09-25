@@ -21,10 +21,11 @@ import argparse
 import json
 import random
 import time
+import uuid
 
 import requests
 
-from common import HUB_URL, ZONES, init_producer, make_event, post_event
+from common import HUB_URL, ZONES, init_producer, make_event, post_event, enable_recording, close_recording, now_utc_iso
 from sensor_sim import emit_door_open, emit_motion
 from syslog_sim import emit_login, emit_login_spike
 
@@ -105,11 +106,11 @@ def act3_multi_vector_breach(zone_id: str = "Perimeter_Gate_3", mock_cctv: bool 
     print("-> person crosses tripwire")
     if mock_cctv:
         emit_cctv_person(zone_id, confidence=0.93, tripwire=True)
-    time.sleep(0.4)
+    time.sleep(0.1)
 
     print("-> door contact opens off-shift")
     emit_door_open(zone_id, off_shift=True, confidence=0.98)
-    time.sleep(0.4)
+    time.sleep(0.1)
 
     print("-> login spike hits the same zone")
     emit_login_spike(zone_id, burst=12)
@@ -131,11 +132,12 @@ def run_replay(path: str, speed: float = 1.0):
             # best-effort gap reconstruction from ts_utc; falls back to 0.3s
             gap = 0.3
             time.sleep(gap / speed)
-        prev_ts = evt.get("ts_utc")
-        # give replayed events a fresh event_id/ts so backend correlation windows still work
-        evt["event_id"] = evt.get("event_id")
+        prev_ts = evt.get("ts_utc") or evt.get("timestamp")
+        # give replayed events a fresh event_id and timestamp so backend correlation windows still work
+        evt["event_id"] = str(uuid.uuid4())
+        evt["timestamp"] = now_utc_iso()
         success = post_event(evt)
-        print(f"[replay] {evt.get('type')} @ {evt.get('zone_id')} -> {'OK' if success else 'FAIL'}")
+        print(f"[replay] {evt.get('type') or evt.get('event_type')} @ {evt.get('zone_id')} -> {'OK' if success else 'FAIL'}")
     print("[replay] done")
 
 
@@ -156,7 +158,7 @@ if __name__ == "__main__":
     init_producer("scenario_runner")
 
     if args.record:
-        _record_fh = open(args.record, "w")
+        enable_recording(args.record)
 
     try:
         if args.act == 1:
@@ -171,6 +173,6 @@ if __name__ == "__main__":
             time.sleep(2)
             act3_multi_vector_breach(zone_id=args.zone, mock_cctv=args.mock_cctv)
     finally:
-        if _record_fh:
-            _record_fh.close()
+        if args.record:
+            close_recording()
             print(f"[scenario] recorded events saved to {args.record}")

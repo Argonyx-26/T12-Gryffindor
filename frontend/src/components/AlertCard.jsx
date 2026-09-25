@@ -149,8 +149,40 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
     }
   };
 
+  /**
+   * Action handler: Acknowledges incident
+   */
+  const handleAcknowledge = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'ACKNOWLEDGED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/acknowledge`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to acknowledge ${incident_id}:`, err);
+    }
+  };
+
+  /**
+   * Action handler: Resolves incident
+   */
+  const handleResolve = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'RESOLVED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/resolve`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to resolve ${incident_id}:`, err);
+    }
+  };
+
   const isDispatched = status === 'dispatched';
   const isFalsePositive = status === 'false_positive';
+  const isAcknowledged = status === 'ACKNOWLEDGED';
+  const isResolved = status === 'RESOLVED';
 
   return (
     <div
@@ -225,8 +257,40 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         </div>
       </div>
 
-      {/* Action Buttons: Dispatch & Mark False Positive */}
+      {/* Action Buttons: Acknowledge, Resolve, False Positive & Dispatch */}
       <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center gap-2 justify-end flex-wrap">
+        {/* Acknowledge Button */}
+        <button
+          type="button"
+          onClick={handleAcknowledge}
+          disabled={isAcknowledged || isResolved}
+          title="Acknowledge alert (PATCH /incidents/{id}/acknowledge)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isAcknowledged
+              ? 'bg-amber-950/60 text-amber-300 border-amber-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-amber-400 hover:text-amber-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <Check className="w-3.5 h-3.5 text-amber-400" />
+          <span>{isAcknowledged ? 'ACK' : 'Acknowledge'}</span>
+        </button>
+
+        {/* Resolve Button */}
+        <button
+          type="button"
+          onClick={handleResolve}
+          disabled={isResolved}
+          title="Resolve alert (PATCH /incidents/{id}/resolve)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isResolved
+              ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-emerald-400 hover:text-emerald-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <span>{isResolved ? 'Resolved' : 'Resolve'}</span>
+        </button>
+
         {/* False Positive Button */}
         <button
           type="button"

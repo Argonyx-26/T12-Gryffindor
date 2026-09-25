@@ -14,12 +14,12 @@ _offset = 0.0
 _synced = False
 
 
-def sync_clock(hub: str = None, rounds: int = 5) -> float:
+def sync_clock(hub: str | None = None, rounds: int = 5) -> float:
     """Runs a small NTP-style handshake against GET {hub}/time and stores
     the offset between this machine's clock and the hub's clock. Call this
     once at process startup, before emitting any events."""
     global _offset, _synced
-    hub = hub or os.getenv("HUB_URL", "http://localhost:8000")
+    hub = hub or os.getenv("HUB_URL", "http://127.0.0.1:8000")
     best = None
     for _ in range(rounds):
         try:

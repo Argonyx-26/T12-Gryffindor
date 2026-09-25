@@ -13,7 +13,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  * 4. Exposes connection state: "connected", "reconnecting", or "disconnected".
  * 5. Provides helper function to optimistically update alert status (e.g., dispatched or false_positive).
  */
-const DEFAULT_WS_URL = 'ws://localhost:8000/ws/alerts';
+const DEFAULT_WS_URL = 'ws://127.0.0.1:8000/ws/alerts';
 const RECONNECT_DELAY_MS = 3000;
 
 export function useAlertSocket(customUrl) {
