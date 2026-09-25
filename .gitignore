@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Model weights (auto-downloaded by YOLO)
+*.pt
+
+# Video and media files
+data/*.mp4
+data/*.avi
+data/*.mkv
+data/*.mov
+!data/README.md
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
