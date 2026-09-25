@@ -14,6 +14,7 @@ import time
 import uuid
 import json
 import argparse
+import threading
 from datetime import datetime, timezone
 import requests
 import cv2
@@ -34,6 +35,9 @@ DEFAULT_VIDEO_PATH = os.path.join("data", "sample.mp4")
 
 # YOLO model name (Nano is lightweight and fast)
 MODEL_NAME = "yolov8n.pt"
+
+# Performance Settings: Reduced inference resolution from 640 to 320 for 2-3x faster CPU throughput
+INFERENCE_IMG_SIZE = 320
 
 # Target inference rate in frames per second (processes YOLO ~5 times per second)
 TARGET_INFERENCE_FPS = 5
@@ -117,18 +121,21 @@ def generate_intrusion_event(confidence: float, bbox: list) -> dict:
 def send_event_to_hub(event: dict) -> None:
     """
     Sends an intrusion event dictionary as an HTTP POST request to {HUB_URL}/ingest
-    using the Python 'requests' library.
+    using the Python 'requests' library in a background daemon thread.
     
-    Wrapped in try/except so that network failures or a disconnected/slow server
-    never crash or freeze the OpenCV video processing loop.
+    Wrapped in try/except and dispatched asynchronously so network round-trips
+    never block or reduce the video processing frame rate.
     """
-    try:
-        response = requests.post(INGEST_URL, json=event, timeout=3.0)
-        print(f"📡 [HUB RESPONSE] Status {response.status_code}: {response.text.strip()}")
-    except requests.exceptions.RequestException as exc:
-        print(f"⚠️ [HUB ERROR] Failed to send event to Hub at {INGEST_URL}: {exc}")
-    except Exception as exc:
-        print(f"⚠️ [HUB UNEXPECTED ERROR] Could not deliver alert to Hub: {exc}")
+    def _worker():
+        try:
+            response = requests.post(INGEST_URL, json=event, timeout=3.0)
+            print(f"📡 [HUB RESPONSE] Status {response.status_code}: {response.text.strip()}", flush=True)
+        except requests.exceptions.RequestException as exc:
+            print(f"⚠️ [HUB ERROR] Failed to send event to Hub at {INGEST_URL}: {exc}", flush=True)
+        except Exception as exc:
+            print(f"⚠️ [HUB UNEXPECTED ERROR] Could not deliver alert to Hub: {exc}", flush=True)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # ==============================================================================
@@ -155,6 +162,12 @@ def main():
         type=int,
         default=None,
         help="Optional maximum number of frames to process before exiting (useful for testing)"
+    )
+    parser.add_argument(
+        "--frame-skip", "-n",
+        type=int,
+        default=None,
+        help="Process YOLO detection every Nth frame (default: auto-calculated for ~5 FPS)"
     )
     args = parser.parse_args()
     video_source = args.video
@@ -204,10 +217,14 @@ def main():
 
     print(f"[INFO] Resolution: {frame_width}x{frame_height}, Native FPS: {video_fps:.2f}")
 
-    # Calculate frame skip factor to achieve ~TARGET_INFERENCE_FPS (5 FPS)
-    # Example: If video is 30 FPS, 30 / 5 = run YOLO every 6 frames
-    frame_interval = max(1, int(round(video_fps / TARGET_INFERENCE_FPS)))
-    print(f"[INFO] YOLO inference will run every {frame_interval} frame(s) to hit ~{TARGET_INFERENCE_FPS} FPS.")
+    # Calculate frame skip factor N to achieve ~TARGET_INFERENCE_FPS (5 FPS)
+    # Allows explicit override via --frame-skip / -n (default: auto-calculated for ~5 FPS)
+    if args.frame_skip is not None and args.frame_skip > 0:
+        frame_interval = args.frame_skip
+    else:
+        frame_interval = max(1, int(round(video_fps / TARGET_INFERENCE_FPS)))
+
+    print(f"[INFO] Performance config: imgsz={INFERENCE_IMG_SIZE}, Frame-skip N={frame_interval} (Target: ~{TARGET_INFERENCE_FPS} FPS)")
 
     # Frame playback delay to maintain original video playback speed
     playback_delay_ms = max(1, int(1000.0 / video_fps))
@@ -220,11 +237,19 @@ def main():
     last_alert_time = 0.0
     latest_detections = []  # Stores (bbox, confidence, center_point, is_inside)
 
+    # FPS Monitoring variables (logged to console every 5 seconds)
+    fps_start_time = time.time()
+    inference_count = 0
+    total_frames_in_interval = 0
+    current_inference_fps = float(TARGET_INFERENCE_FPS)
+
     print("\n[INFO] Starting video loop. Press 'q' in the video window to quit.")
     print("-" * 70)
 
     try:
         while True:
+            frame_start_time = time.time()
+
             # Step 1: Read a frame from the video
             ret, frame = cap.read()
 
@@ -244,6 +269,7 @@ def main():
                     continue
 
             frame_count += 1
+            total_frames_in_interval += 1
 
             # Stop if max_frames limit is set and reached (for testing/automation)
             if args.max_frames and frame_count > args.max_frames:
@@ -253,12 +279,14 @@ def main():
             # Step 2: Run YOLOv8 Nano at throttled ~5 FPS rate
             # Only run inference every `frame_interval` frames
             if frame_count % frame_interval == 0:
+                inference_count += 1
                 latest_detections = []
 
-                # Run inference:
+                # Run inference at reduced image size (320) for 2-3x faster CPU execution:
+                # - imgsz=INFERENCE_IMG_SIZE: Downscale inference to 320 for speed
                 # - classes=[0]: Only detect class 0 ('person' in COCO dataset)
                 # - verbose=False: Suppress default per-frame YOLO printouts
-                results = model(frame, classes=[0], verbose=False)
+                results = model(frame, imgsz=INFERENCE_IMG_SIZE, classes=[0], verbose=False)
 
                 # Process detection results
                 for r in results:
@@ -365,7 +393,7 @@ def main():
             # 3C. Display System HUD Status (Top-Left Corner)
             cv2.putText(
                 frame,
-                f"Threat Detection System | Feed: {TARGET_INFERENCE_FPS} FPS Inference",
+                f"Threat Detection System | Inference: {current_inference_fps:.1f} FPS (Target: ~{TARGET_INFERENCE_FPS})",
                 (15, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
@@ -384,12 +412,31 @@ def main():
                 cv2.LINE_AA
             )
 
-            # Step 3D: Show the live video window
+            # Step 3D: Periodic FPS Logging (Console output every 5 seconds)
+            current_time = time.time()
+            elapsed_fps_time = current_time - fps_start_time
+            if elapsed_fps_time >= 5.0:
+                actual_inference_fps = inference_count / elapsed_fps_time
+                actual_video_fps = total_frames_in_interval / elapsed_fps_time
+                print(
+                    f"⏱️ [FPS MONITOR] Achieving {actual_inference_fps:.2f} FPS Inference "
+                    f"(Target: ~{TARGET_INFERENCE_FPS} FPS) | Video Playback: {actual_video_fps:.2f} FPS",
+                    flush=True
+                )
+                current_inference_fps = actual_inference_fps
+                fps_start_time = current_time
+                inference_count = 0
+                total_frames_in_interval = 0
+
+            # Step 3E: Show the live video window
             cv2.imshow("Intelligent Threat Detection & Situational Awareness", frame)
 
-            # Play at normal video frame rate (wait for playback_delay_ms)
+            # Play at normal video frame rate (compensate for elapsed processing time to keep playback smooth)
+            frame_elapsed_ms = (time.time() - frame_start_time) * 1000.0
+            actual_delay_ms = max(1, int(playback_delay_ms - frame_elapsed_ms))
+
             # Break loop immediately if the user presses 'q'
-            key = cv2.waitKey(playback_delay_ms) & 0xFF
+            key = cv2.waitKey(actual_delay_ms) & 0xFF
             if key == ord('q'):
                 print("\n[INFO] 'q' pressed. Stopping vision worker.")
                 break
