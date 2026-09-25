@@ -40,8 +40,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-red-500 font-extrabold drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
           accentBorder: 'border-l-red-500',
           cardGlow: 'glow-critical bg-red-950/20 border-red-500/50',
-          selectedRing: 'ring-2 ring-red-500 shadow-[0_0_25px_rgba(239,68,68,0.35)]',
-          selectedPill: 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]',
         };
       case 'High':
         return {
@@ -51,8 +49,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-amber-400 font-extrabold',
           accentBorder: 'border-l-amber-500',
           cardGlow: 'bg-amber-950/15 border-amber-500/30 hover:border-amber-400/50',
-          selectedRing: 'ring-2 ring-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.3)]',
-          selectedPill: 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.9)]',
         };
       case 'Medium':
         return {
@@ -62,8 +58,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-yellow-400 font-extrabold',
           accentBorder: 'border-l-yellow-400',
           cardGlow: 'bg-yellow-950/10 border-yellow-500/30 hover:border-yellow-400/50',
-          selectedRing: 'ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.3)]',
-          selectedPill: 'bg-yellow-400 shadow-[0_0_10px_rgba(234,179,8,0.9)]',
         };
       case 'Low':
       default:
@@ -74,8 +68,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-emerald-400 font-extrabold',
           accentBorder: 'border-l-emerald-500',
           cardGlow: 'bg-emerald-950/10 border-emerald-500/30 hover:border-emerald-400/50',
-          selectedRing: 'ring-2 ring-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.3)]',
-          selectedPill: 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.9)]',
         };
     }
   };
@@ -229,8 +221,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         isFalsePositive ? 'opacity-50 grayscale-[30%]' : ''
       } ${
         isSelected
-          ? `${style.selectedRing} bg-slate-900/95`
-          : 'bg-slate-900/60 hover:bg-slate-900/90 border-t border-r border-b border-slate-800 hover:border-slate-700'
+          ? 'ring-2 ring-red-500/80 shadow-[0_0_25px_rgba(239,68,68,0.25)]'
+          : 'border-t border-r border-b'
       }`}
     >
       {/* Top Header of Card: Incident ID & Severity Badge */}
@@ -373,7 +365,7 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
 
       {/* Selected Indicator Pill */}
       {isSelected && (
-        <div className={`absolute -right-1 top-1/2 -translate-y-1/2 w-1.5 h-8 rounded-l-full ${style.selectedPill}`} />
+        <div className="absolute -right-1 top-1/2 -translate-y-1/2 bg-red-500 w-1.5 h-8 rounded-l-full shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
       )}
     </div>
   );

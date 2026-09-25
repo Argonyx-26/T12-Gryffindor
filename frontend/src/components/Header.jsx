@@ -135,15 +135,6 @@ export default function Header({ isConnected = false, threatPosture = 'DEFCON 4 
             </div>
           </div>
 
-          {/* Secure Network Feed */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded bg-slate-950/70 border border-slate-800">
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            <div className="text-left font-mono">
-              <span className="text-[10px] text-slate-500 block leading-none">SITUATION BUS</span>
-              <span className="text-xs font-semibold text-cyan-300 leading-none">TLS 1.3 SECURE</span>
-            </div>
-          </div>
-
           {/* Live Clock Component */}
           <div className="flex items-center gap-2 px-3.5 py-1.5 rounded bg-slate-950 border border-slate-800 shadow-inner">
             <Clock className="w-4 h-4 text-red-400" />
