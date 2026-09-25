@@ -84,6 +84,28 @@ export function useAlertSocket(customUrl) {
       ];
     }
 
+    // Dynamic detection description wording based on number of sources
+    let sourcesList = Array.isArray(data.sources)
+      ? data.sources
+      : (data.source_type ? [data.source_type] : []);
+
+    let description = data.description;
+    // Fallback extraction if sources array not provided but legacy description string is present
+    if (sourcesList.length === 0 && typeof description === 'string') {
+      const match = description.match(/(?:detection across:\s*)(.+)$/i);
+      if (match) {
+        sourcesList = match[1].split(',').map(s => s.trim()).filter(Boolean);
+      }
+    }
+
+    if (sourcesList.length === 1) {
+      description = `Single-source detection: ${sourcesList[0]}`;
+    } else if (sourcesList.length >= 2) {
+      description = `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
+    } else if (!description || description.startsWith('Corroborated multimodal detection across:') || description.startsWith('Corroborated multi-vector detection across:')) {
+      description = 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+    }
+
     return {
       incident_id,
       zone_id: data.zone_id || data.zone || 'Sector Unknown',
@@ -91,13 +113,14 @@ export function useAlertSocket(customUrl) {
       severity,
       timestamp: formattedTimestamp,
       status: data.status || 'open',
-      description: data.description || (
-        data.sources ? `Corroborated multimodal detection across: ${data.sources.join(', ')}` :
-        'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.'
-      ),
+      description,
       camera_id: data.camera_id || (data.zone_id ? `CAM-${String(data.zone_id).replace(/\s+/g, '-').slice(0, 10).toUpperCase()}` : 'CAM-PRIMARY'),
       correlated_events,
+      sources: sourcesList,
       ...data, // Preserve any additional backend fields
+      // Ensure our dynamic description and normalized sources override any legacy backend description
+      description,
+      sources: sourcesList,
     };
   }, []);
 
