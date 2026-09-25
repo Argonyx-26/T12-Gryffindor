@@ -777,6 +777,16 @@ async def submit_incident_feedback(incident_id: str, feedback: FeedbackRequest):
     return incident
 
 
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Reset all events, incidents, and correlation engine state."""
+    event_store.clear()
+    incident_store.clear()
+    INCIDENTS_DB.clear()
+    engine.reset()
+    return {"status": "reset", "message": "All incidents, events, and engine buffers cleared."}
+
+
 @app.get("/metrics", tags=["Metrics"])
 def get_metrics():
     """
