@@ -9,6 +9,8 @@ Phases executed:
 - Part 3: "Multi-Vector Breach" - Triggers near-simultaneous physical perimeter breach and cyber brute-force attack.
 """
 
+import os
+import requests
 import time
 import threading
 
@@ -20,10 +22,15 @@ except ImportError:
     from simulators import sensor_sim
     from simulators import syslog_sim
 
+# FastAPI hub configuration from environment variable with localhost fallback
+HUB_URL = os.getenv("HUB_URL", "http://localhost:8000")
+INGEST_URL = f"{HUB_URL.rstrip('/')}/ingest"
+
 
 def main():
     print("======================================================================")
     print("  INTELLIGENT THREAT DETECTION & SITUATIONAL AWARENESS DEMO RUNNER")
+    print(f"  Target HUB_URL: {INGEST_URL}")
     print("======================================================================\n")
 
     # ==================================================================
