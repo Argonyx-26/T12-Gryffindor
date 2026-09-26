@@ -19,6 +19,37 @@ const DEFAULT_API_URL = 'http://localhost:8000';
 const RECONNECT_DELAY_MS = 3000;
 
 /**
+ * Calculate incident synopsis label based on distinct source types:
+ * - Count DISTINCT source_types across all merged events / sources.
+ * - Use "Single-source detection: [source]" if only 1 distinct source_type.
+ * - Use "Corroborated multi-vector detection across: [sources]" if 2 or more distinct source_types.
+ */
+export function calculateSynopsis(sources, fallbackDescription) {
+  let distinctSources = [];
+  if (Array.isArray(sources)) {
+    distinctSources = Array.from(new Set(sources.filter(Boolean)));
+  }
+
+  if (distinctSources.length === 1) {
+    return `Single-source detection: ${distinctSources[0]}`;
+  } else if (distinctSources.length >= 2) {
+    return `Corroborated multi-vector detection across: ${distinctSources.join(', ')}`;
+  }
+
+  // Preserve existing custom description if provided (and not legacy generic templates)
+  if (
+    fallbackDescription &&
+    !fallbackDescription.startsWith('Corroborated multimodal detection across:') &&
+    !fallbackDescription.startsWith('Corroborated multi-vector detection across:') &&
+    !fallbackDescription.startsWith('Single-source detection:')
+  ) {
+    return fallbackDescription;
+  }
+
+  return fallbackDescription || 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
+}
+
+/**
  * Helper function to normalize alert fields so they map cleanly to the UI,
  * handling both full Incident objects and lightweight alert notifications.
  */
@@ -72,40 +103,29 @@ export function normalizeAlert(data) {
   }
 
   // Dynamic detection description wording based on number of sources
-  let sourcesList = Array.isArray(data.sources)
-    ? data.sources
-    : (data.source_type ? [data.source_type] : []);
-
-  let description = data.description;
-  // Fallback extraction if sources array not provided but legacy description string is present
-  if (sourcesList.length === 0 && typeof description === 'string') {
-    const match = description.match(/(?:detection across:\s*)(.+)$/i);
-    if (match) {
-      sourcesList = match[1].split(',').map(s => s.trim()).filter(Boolean);
-    }
+  let sourcesList = [];
+  if (Array.isArray(data.sources) && data.sources.length > 0) {
+    sourcesList = Array.from(new Set(data.sources.filter(Boolean)));
+  } else if (Array.isArray(data.events) && data.events.length > 0) {
+    sourcesList = Array.from(new Set(data.events.map(e => e.source_type || e.source).filter(Boolean)));
+  } else if (data.source_type) {
+    sourcesList = [data.source_type];
   }
 
-  if (sourcesList.length === 1) {
-    description = `Single-source detection: ${sourcesList[0]}`;
-  } else if (sourcesList.length >= 2) {
-    description = `Corroborated multi-vector detection across: ${sourcesList.join(', ')}`;
-  } else if (!description || description.startsWith('Corroborated multimodal detection across:') || description.startsWith('Corroborated multi-vector detection across:')) {
-    description = 'Multi-vector physical/cyber anomaly detected by Gryffindor Sentinel.';
-  }
+  const description = calculateSynopsis(sourcesList, data.description);
 
   return {
+    ...data, // Preserve any additional backend fields
     incident_id,
     zone_id: data.zone_id || data.zone || 'Sector Unknown',
     score: typeof data.score === 'number' ? Math.round(data.score) : Number(data.score) || 0,
     severity,
     timestamp: formattedTimestamp,
     status: data.status || 'open',
+    sources: sourcesList,
+    description,
     camera_id: data.camera_id || (data.zone_id ? `CAM-${String(data.zone_id).replace(/\s+/g, '-').slice(0, 10).toUpperCase()}` : 'CAM-PRIMARY'),
     correlated_events,
-    ...data, // Preserve any additional backend fields
-    // Ensure our dynamic description and normalized sources override any legacy backend description
-    description,
-    sources: sourcesList,
   };
 }
 
@@ -128,8 +148,8 @@ export function useAlertSocket(customUrl) {
   const socketRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
+  const connectRef = useRef(null);
   const dismissedIdsRef = useRef(new Set());
-
 
   /**
    * Main connection management function
@@ -147,7 +167,7 @@ export function useAlertSocket(customUrl) {
         socketRef.current.onclose = null;
         socketRef.current.onerror = null;
         socketRef.current.close();
-      } catch (_e) {
+      } catch {
         // ignore cleanup error
       }
       socketRef.current = null;
@@ -182,10 +202,46 @@ export function useAlertSocket(customUrl) {
               .filter((a) => !dismissedIdsRef.current.has(a.incident_id));
 
             setAlerts((prevAlerts) => {
-              // Add new alerts to the TOP, avoiding duplicate IDs
-              const existingIds = new Set(prevAlerts.map(a => a.incident_id));
-              const freshAlerts = normalizedBatch.filter(a => !existingIds.has(a.incident_id));
-              return [...freshAlerts, ...prevAlerts];
+              const updated = [...prevAlerts];
+              const freshAlerts = [];
+
+              for (const norm of normalizedBatch) {
+                const existingIndex = updated.findIndex(a => a.incident_id === norm.incident_id);
+                if (existingIndex !== -1) {
+                  const existing = updated[existingIndex];
+                  const mergedSources = Array.from(new Set([
+                    ...(Array.isArray(existing.sources) ? existing.sources : []),
+                    ...(Array.isArray(norm.sources) ? norm.sources : [])
+                  ].filter(Boolean)));
+                  const mergedEventIds = Array.from(new Set([
+                    ...(Array.isArray(existing.event_ids) ? existing.event_ids : []),
+                    ...(Array.isArray(norm.event_ids) ? norm.event_ids : [])
+                  ].filter(Boolean)));
+                  const updatedDescription = calculateSynopsis(
+                    mergedSources,
+                    norm.description || existing.description
+                  );
+
+                  let updatedCorrelatedEvents = norm.correlated_events || existing.correlated_events;
+                  if (mergedEventIds.length > 0) {
+                    updatedCorrelatedEvents = mergedEventIds.map(
+                      (id, idx) => `Correlated sensor hit #${idx + 1} (Event ID: ${id})`
+                    );
+                  }
+
+                  updated[existingIndex] = {
+                    ...existing,
+                    ...norm,
+                    sources: mergedSources.length > 0 ? mergedSources : (norm.sources || existing.sources),
+                    event_ids: mergedEventIds.length > 0 ? mergedEventIds : (norm.event_ids || existing.event_ids),
+                    description: updatedDescription,
+                    correlated_events: updatedCorrelatedEvents,
+                  };
+                } else {
+                  freshAlerts.push(norm);
+                }
+              }
+              return [...freshAlerts, ...updated];
             });
           } else if (rawData && typeof rawData === 'object') {
             const normalized = normalizeAlert(rawData);
@@ -197,7 +253,39 @@ export function useAlertSocket(customUrl) {
                 const existingIndex = prevAlerts.findIndex(a => a.incident_id === normalized.incident_id);
                 if (existingIndex !== -1) {
                   const updated = [...prevAlerts];
-                  updated[existingIndex] = { ...updated[existingIndex], ...normalized };
+                  const existing = updated[existingIndex];
+
+                  // Count DISTINCT source_types across all merged events
+                  const mergedSources = Array.from(new Set([
+                    ...(Array.isArray(existing.sources) ? existing.sources : []),
+                    ...(Array.isArray(normalized.sources) ? normalized.sources : [])
+                  ].filter(Boolean)));
+
+                  const mergedEventIds = Array.from(new Set([
+                    ...(Array.isArray(existing.event_ids) ? existing.event_ids : []),
+                    ...(Array.isArray(normalized.event_ids) ? normalized.event_ids : [])
+                  ].filter(Boolean)));
+
+                  const updatedDescription = calculateSynopsis(
+                    mergedSources,
+                    normalized.description || existing.description
+                  );
+
+                  let updatedCorrelatedEvents = normalized.correlated_events || existing.correlated_events;
+                  if (mergedEventIds.length > 0) {
+                    updatedCorrelatedEvents = mergedEventIds.map(
+                      (id, idx) => `Correlated sensor hit #${idx + 1} (Event ID: ${id})`
+                    );
+                  }
+
+                  updated[existingIndex] = {
+                    ...existing,
+                    ...normalized,
+                    sources: mergedSources.length > 0 ? mergedSources : (normalized.sources || existing.sources),
+                    event_ids: mergedEventIds.length > 0 ? mergedEventIds : (normalized.event_ids || existing.event_ids),
+                    description: updatedDescription,
+                    correlated_events: updatedCorrelatedEvents,
+                  };
                   return updated;
                 }
                 // Prepend new incoming alert to the TOP (most recent first)
@@ -221,7 +309,7 @@ export function useAlertSocket(customUrl) {
         }
         reconnectTimerRef.current = setTimeout(() => {
           if (isMountedRef.current) {
-            connect();
+            connectRef.current?.();
           }
         }, RECONNECT_DELAY_MS);
       };
@@ -242,12 +330,17 @@ export function useAlertSocket(customUrl) {
         }
         reconnectTimerRef.current = setTimeout(() => {
           if (isMountedRef.current) {
-            connect();
+            connectRef.current?.();
           }
         }, RECONNECT_DELAY_MS);
       }
     }
-  }, [wsUrl, normalizeAlert]);
+  }, [wsUrl]);
+
+  // Keep connectRef synchronized with connect function
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // Establish connection on mount and cleanup on unmount
   useEffect(() => {
@@ -290,7 +383,7 @@ export function useAlertSocket(customUrl) {
             }
           }
         }
-      } catch (_err) {
+      } catch {
         // Backend not reached or offline
       }
     };
@@ -299,7 +392,7 @@ export function useAlertSocket(customUrl) {
     return () => {
       isCancelled = true;
     };
-  }, [apiUrl, normalizeAlert]);
+  }, [apiUrl]);
 
   /**
    * Load mock demo alert scenarios for offline testing or demonstration
@@ -308,7 +401,7 @@ export function useAlertSocket(customUrl) {
     dismissedIdsRef.current.clear();
     const normalized = INITIAL_ALERTS.map(normalizeAlert).filter(Boolean);
     setAlerts(normalized);
-  }, [normalizeAlert]);
+  }, []);
 
   /**
    * Optimistically update an alert's status in local state (e.g., 'dispatched' or 'false_positive')
@@ -338,12 +431,12 @@ export function useAlertSocket(customUrl) {
     });
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-      await fetch(`${apiUrl}/incidents`, { method: 'DELETE' });
+      const base = (apiUrl || DEFAULT_API_URL).replace(/\/+$/, '');
+      await fetch(`${base}/incidents`, { method: 'DELETE' });
     } catch {
       // Backend may not support DELETE /incidents yet
     }
-  }, []);
+  }, [apiUrl]);
 
   /**
    * Restore all previously dismissed alerts

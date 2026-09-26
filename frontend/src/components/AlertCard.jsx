@@ -40,8 +40,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-red-500 font-extrabold drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
           accentBorder: 'border-l-red-500',
           cardGlow: 'glow-critical bg-red-950/20 border-red-500/50',
-          selectedRing: 'ring-2 ring-red-500 shadow-[0_0_25px_rgba(239,68,68,0.35)]',
-          selectedPill: 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]',
         };
       case 'High':
         return {
@@ -51,8 +49,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-amber-400 font-extrabold',
           accentBorder: 'border-l-amber-500',
           cardGlow: 'bg-amber-950/15 border-amber-500/30 hover:border-amber-400/50',
-          selectedRing: 'ring-2 ring-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.3)]',
-          selectedPill: 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.9)]',
         };
       case 'Medium':
         return {
@@ -62,8 +58,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-yellow-400 font-extrabold',
           accentBorder: 'border-l-yellow-400',
           cardGlow: 'bg-yellow-950/10 border-yellow-500/30 hover:border-yellow-400/50',
-          selectedRing: 'ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.3)]',
-          selectedPill: 'bg-yellow-400 shadow-[0_0_10px_rgba(234,179,8,0.9)]',
         };
       case 'Low':
       default:
@@ -74,8 +68,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
           scoreColor: 'text-emerald-400 font-extrabold',
           accentBorder: 'border-l-emerald-500',
           cardGlow: 'bg-emerald-950/10 border-emerald-500/30 hover:border-emerald-400/50',
-          selectedRing: 'ring-2 ring-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.3)]',
-          selectedPill: 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.9)]',
         };
     }
   };
@@ -157,8 +149,40 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
     }
   };
 
+  /**
+   * Action handler: Acknowledges incident
+   */
+  const handleAcknowledge = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'ACKNOWLEDGED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/acknowledge`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to acknowledge ${incident_id}:`, err);
+    }
+  };
+
+  /**
+   * Action handler: Resolves incident
+   */
+  const handleResolve = async (e) => {
+    e.stopPropagation();
+    if (onUpdateStatus) {
+      onUpdateStatus(incident_id, 'RESOLVED');
+    }
+    try {
+      await fetch(`${apiUrl}/incidents/${encodeURIComponent(incident_id)}/resolve`, { method: 'PATCH' });
+    } catch (err) {
+      console.error(`[API ERROR] Failed to resolve ${incident_id}:`, err);
+    }
+  };
+
   const isDispatched = status === 'dispatched';
   const isFalsePositive = status === 'false_positive';
+  const isAcknowledged = status === 'ACKNOWLEDGED';
+  const isResolved = status === 'RESOLVED';
 
   // Dynamic description logic:
   // If 1 source: "Single-source detection: [source]"
@@ -197,8 +221,8 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         isFalsePositive ? 'opacity-50 grayscale-[30%]' : ''
       } ${
         isSelected
-          ? `${style.selectedRing} bg-slate-900/95`
-          : 'bg-slate-900/60 hover:bg-slate-900/90 border-t border-r border-b border-slate-800 hover:border-slate-700'
+          ? 'ring-2 ring-red-500/80 shadow-[0_0_25px_rgba(239,68,68,0.25)]'
+          : 'border-t border-r border-b'
       }`}
     >
       {/* Top Header of Card: Incident ID & Severity Badge */}
@@ -263,8 +287,40 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
         </div>
       </div>
 
-      {/* Action Buttons: Dispatch & Mark False Positive */}
+      {/* Action Buttons: Acknowledge, Resolve, False Positive & Dispatch */}
       <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center gap-2 justify-end flex-wrap">
+        {/* Acknowledge Button */}
+        <button
+          type="button"
+          onClick={handleAcknowledge}
+          disabled={isAcknowledged || isResolved}
+          title="Acknowledge alert (PATCH /incidents/{id}/acknowledge)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isAcknowledged
+              ? 'bg-amber-950/60 text-amber-300 border-amber-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-amber-400 hover:text-amber-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <Check className="w-3.5 h-3.5 text-amber-400" />
+          <span>{isAcknowledged ? 'ACK' : 'Acknowledge'}</span>
+        </button>
+
+        {/* Resolve Button */}
+        <button
+          type="button"
+          onClick={handleResolve}
+          disabled={isResolved}
+          title="Resolve alert (PATCH /incidents/{id}/resolve)"
+          className={`px-2.5 py-1.5 rounded text-xs font-mono uppercase tracking-wider border transition-colors flex items-center gap-1.5 active:scale-95 ${
+            isResolved
+              ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 cursor-not-allowed'
+              : 'bg-slate-950 hover:bg-slate-800 text-emerald-400 hover:text-emerald-300 border-slate-800 hover:border-slate-700'
+          }`}
+        >
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <span>{isResolved ? 'Resolved' : 'Resolve'}</span>
+        </button>
+
         {/* False Positive Button */}
         <button
           type="button"
@@ -309,7 +365,7 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
 
       {/* Selected Indicator Pill */}
       {isSelected && (
-        <div className={`absolute -right-1 top-1/2 -translate-y-1/2 w-1.5 h-8 rounded-l-full ${style.selectedPill}`} />
+        <div className="absolute -right-1 top-1/2 -translate-y-1/2 bg-red-500 w-1.5 h-8 rounded-l-full shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
       )}
     </div>
   );

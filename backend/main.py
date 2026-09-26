@@ -5,6 +5,7 @@ Provides endpoints for event ingestion, threat correlation, incident dispatch, a
 
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ from backend.constants import (
     SOURCE_WEIGHTS,
 )
 from backend.models import Event, Incident, SeverityLevel
+from backend.scoring_engine import ScoringEngine
 
 # Feedback schema for operator action
 class FeedbackBody(BaseModel):
@@ -75,6 +77,20 @@ ZONES_DB: Dict[str, Dict[str, Any]] = {}
 EVENTS_DB: List[Event] = []
 INCIDENTS_DB: Dict[str, Incident] = {}
 
+# Storage configuration & mode detection (SQLite / in-memory fallback)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+STORAGE_MODE = "SQLite" if DATABASE_URL.startswith("sqlite") or os.getenv("STORAGE_MODE", "").lower() == "sqlite" else "in-memory"
+logger = logging.getLogger("uvicorn.info")
+
+
+@app.on_event("startup")
+async def startup_event():
+    startup_msg = f"[STORAGE CONFIG] Active storage fallback mode: {STORAGE_MODE}"
+    print(f"\n==================================================================", flush=True)
+    print(f"  {startup_msg}", flush=True)
+    print(f"==================================================================\n", flush=True)
+    logger.info(startup_msg)
+
 # Locate and load data/zones.json
 BASE_DIR = Path(__file__).resolve().parent.parent
 ZONES_FILE = BASE_DIR / "data" / "zones.json"
@@ -118,11 +134,11 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     """
     Correlate events occurring within CORRELATION_WINDOW_SECONDS in the same zone.
     Computes weighted threat score incorporating modality weights, distinct source
-    corroboration multiplier, and zone critical weights.
+    corroboration multiplier, and zone critical weights. De-duplicates active incidents.
     """
     new_event_dt = parse_iso(new_event.timestamp)
 
-    # Find temporally correlated events in the same zone within the correlation window
+    # 1. Find all events in the same zone within the correlation window.
     correlated_events = [new_event]
     for ev in reversed(EVENTS_DB):
         if ev.event_id == new_event.event_id:
@@ -134,34 +150,87 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         if time_diff <= CORRELATION_WINDOW_SECONDS:
             correlated_events.append(ev)
 
-    distinct_sources = list({ev.source_type for ev in correlated_events})
+    distinct_sources = sorted(list({ev.source_type for ev in correlated_events}))
     num_sources = len(distinct_sources)
-    multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
 
-    # Zone criticality factor
+    # 3. Zone criticality factor.
+    load_zones()
     zone_info = ZONES_DB.get(new_event.zone_id, {})
-    zone_weight = float(zone_info.get("zone_weight", 1.0))
 
-    # Base weighted confidence score: sum(source_weight * confidence)
-    base_score = 0.0
-    for ev in correlated_events:
-        weight = SOURCE_WEIGHTS.get(ev.source_type, 0.3)
-        base_score += ev.confidence * weight * 100.0
+    # Use ScoringEngine to compute contextual score, breakdown, factors, explanation & recommendations
+    final_score, score_breakdown, contributing_factors, explanation, recommendations = (
+        ScoringEngine.calculate_contextual_score(correlated_events, zone_info)
+    )
 
-    # Normalize base score by number of events and scale by multiplier & zone weight
-    normalized_score = (base_score / len(correlated_events)) * multiplier * (zone_weight / 1.5)
-    final_score = round(min(100.0, max(0.0, normalized_score)), 2)
+    severity = calculate_incident_severity(final_score)
 
-    # If score qualifies for detection, generate or update an Incident
+    # Exact suppression rule before an incident is created or broadcast:
+    # If the number of distinct source_types contributing is less than 2,
+    # AND the calculated severity is "Low" or "Medium", do NOT create or broadcast
+    # an incident — just store/log the event normally without alerting.
+    # Only genuine multi-source corroboration (2+ distinct source types within
+    # the correlation window) should create a visible incident, UNLESS a single
+    # source's score independently reaches High or Critical severity on its own.
+    if num_sources < 2 and severity in ("Low", "Medium"):
+        return None
+
+    avg_conf = round(sum(ev.confidence for ev in correlated_events) / len(correlated_events), 4)
+    corr_summary = (
+        f"Correlated {len(correlated_events)} event(s) across sources [{', '.join(distinct_sources)}] "
+        f"within {CORRELATION_WINDOW_SECONDS}s window in {new_event.zone_id}"
+    )
+
+    print(f"[backend] Correlated {len(correlated_events)} events from {distinct_sources} in {new_event.zone_id} -> score={final_score} ({severity})", flush=True)
+
+    # Check for existing active incident in the same zone within correlation window to de-duplicate
+    existing_incident = None
+    for inc in reversed(list(INCIDENTS_DB.values())):
+        if inc.zone_id == new_event.zone_id and inc.status in ["open", "dispatched", "DETECTED", "CORRELATED", "SCORED"]:
+            inc_first_dt = parse_iso(inc.first_ts)
+            if abs((new_event_dt - inc_first_dt).total_seconds()) <= CORRELATION_WINDOW_SECONDS + 5.0:
+                existing_incident = inc
+                break
+
     first_event = min(correlated_events, key=lambda e: parse_iso(e.timestamp))
     now_utc = datetime.now(timezone.utc)
     first_dt = parse_iso(first_event.timestamp)
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
 
-    severity = calculate_incident_severity(final_score)
+    if existing_incident:
+        # De-duplicate & update existing incident
+        updated_dict = existing_incident.model_dump()
+        updated_dict["score"] = max(existing_incident.score, final_score)
+        updated_dict["severity"] = calculate_incident_severity(updated_dict["score"])
+        updated_dict["sources"] = sorted(list(set(existing_incident.sources + distinct_sources)))
+        updated_dict["event_ids"] = list(set(existing_incident.event_ids + [e.event_id for e in correlated_events]))
+        updated_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
+        updated_dict["explanation"] = explanation
+        updated_dict["contributing_factors"] = list(set(existing_incident.contributing_factors + contributing_factors))
+        updated_dict["score_breakdown"] = score_breakdown
+        updated_dict["confidence_summary"] = avg_conf
+        updated_dict["correlation_summary"] = corr_summary
+        updated_dict["recommendations"] = recommendations
+        updated_dict["timeline"] = ScoringEngine.build_timeline(
+            existing_incident.timeline, correlated_events, existing_incident.incident_id, updated_dict["score"], updated_dict["severity"]
+        )
+
+        if updated_dict["severity"] in ["Critical", "High"] and not updated_dict.get("dispatch_ts"):
+            updated_dict["dispatch_ts"] = now_utc.isoformat()
+            updated_dict["status"] = "dispatched"
+
+        # Check suppression rule on merged incident as well
+        if len(updated_dict["sources"]) < 2 and updated_dict["severity"] in ("Low", "Medium"):
+            return None
+
+        updated_incident = Incident(**updated_dict)
+        INCIDENTS_DB[existing_incident.incident_id] = updated_incident
+        return updated_incident
+
+    new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+    timeline = ScoringEngine.build_timeline([], correlated_events, new_inc_id, final_score, severity)
 
     incident = Incident(
-        incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
+        incident_id=new_inc_id,
         zone_id=new_event.zone_id,
         score=final_score,
         severity=severity,
@@ -172,10 +241,40 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
         status="dispatched" if severity in ["Critical", "High"] else "open",
+        explanation=explanation,
+        contributing_factors=contributing_factors,
+        score_breakdown=score_breakdown,
+        confidence_summary=avg_conf,
+        correlation_summary=corr_summary,
+        timeline=timeline,
+        recommendations=recommendations,
     )
 
     INCIDENTS_DB[incident.incident_id] = incident
+    print(f"[backend] Synthesized Incident {incident.incident_id} (score={final_score}, severity={severity}, status={incident.status})", flush=True)
     return incident
+
+
+class CorrelationEngine:
+    """Compatibility wrapper around evaluate_threat_correlation for testing."""
+    def __init__(self, dedup_window_seconds: float = 5.0, cooldown_window_seconds: float = 5.0):
+        self.dedup_window_seconds = dedup_window_seconds
+        self.cooldown_window_seconds = cooldown_window_seconds
+
+    def process_event(self, event_data: Dict[str, Any]) -> Optional[Incident]:
+        ev = Event(**event_data) if isinstance(event_data, dict) else event_data
+        if not any(e.event_id == ev.event_id for e in EVENTS_DB):
+            EVENTS_DB.append(ev)
+        return evaluate_threat_correlation(ev)
+
+    def reset(self):
+        EVENTS_DB.clear()
+        INCIDENTS_DB.clear()
+
+
+engine = CorrelationEngine()
+incident_store = INCIDENTS_DB
+event_store = EVENTS_DB
 
 
 @app.get("/", tags=["System"])
@@ -191,6 +290,38 @@ def root():
             "active_incidents": len(INCIDENTS_DB),
         },
         "docs_url": "/docs",
+    }
+
+
+@app.get("/time", tags=["System"])
+def get_time():
+    """Clock sync endpoint returning current epoch timestamp."""
+    import time
+    return {"epoch": time.time()}
+
+
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Clears all in-memory events and incidents. Useful between demo runs."""
+    EVENTS_DB.clear()
+    INCIDENTS_DB.clear()
+    return {"message": "System state reset.", "events": 0, "incidents": 0}
+
+
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """System metrics overview."""
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    suppressed = max(0, total_events - total_incidents)
+    suppression_pct = (suppressed / total_events * 100.0) if total_events > 0 else 0.0
+    return {
+        "status": "online",
+        "monitored_zones": len(ZONES_DB),
+        "ingested_events": total_events,
+        "active_incidents": total_incidents,
+        "suppressed_events": suppressed,
+        "suppression_rate_pct": round(suppression_pct, 2),
     }
 
 
@@ -219,8 +350,17 @@ async def ingest_event(event: Event):
 
     # Run multi-source threat correlation
     incident = evaluate_threat_correlation(event)
+
+    # Exact suppression rule before an incident is created or broadcast to the WebSocket:
+    # If the number of distinct source_types contributing is less than 2, AND the calculated
+    # severity is "Low" or "Medium", do NOT create or broadcast an incident — just store/log
+    # the event normally without alerting.
     if incident:
-        await manager.broadcast(incident.model_dump())
+        if len(incident.sources) < 2 and incident.severity in ("Low", "Medium"):
+            INCIDENTS_DB.pop(incident.incident_id, None)
+            incident = None
+        else:
+            await manager.broadcast(incident.model_dump())
 
     return {
         "message": "Event ingested and processed successfully.",
@@ -252,19 +392,10 @@ def list_incidents(
     """Retrieve all synthesized threat incidents."""
     incidents = list(INCIDENTS_DB.values())
     if severity:
-        incidents = [inc for inc in incidents if inc.severity == severity]
+        incidents = [inc for inc in incidents if inc.severity.lower() == severity.lower()]
     if status_filter:
-        incidents = [inc for inc in incidents if inc.status == status_filter]
+        incidents = [inc for inc in incidents if inc.status.lower() == status_filter.lower()]
     return incidents
-
-
-@app.delete("/incidents", tags=["Incidents"])
-async def clear_all_incidents():
-    """Clear all incidents and events from in-memory storage and broadcast reset."""
-    INCIDENTS_DB.clear()
-    EVENTS_DB.clear()
-    await manager.broadcast([])
-    return {"message": "All incidents and events cleared successfully.", "active_incidents": 0}
 
 
 @app.get("/incidents/{incident_id}", response_model=Incident, tags=["Incidents"])
@@ -316,6 +447,36 @@ def update_incident_status(
     updated_incident = Incident(**incident_dict)
     INCIDENTS_DB[incident_id] = updated_incident
     return updated_incident
+
+
+@app.get("/metrics", tags=["System"])
+def get_metrics():
+    """
+    Returns headline demo metrics: total events, total incidents,
+    noise suppression percentage, and average incident latency.
+    """
+    total_events = len(EVENTS_DB)
+    total_incidents = len(INCIDENTS_DB)
+    if total_events > 0:
+        suppression_pct = round(
+            (1 - (total_incidents / total_events)) * 100.0, 2
+        )
+    else:
+        suppression_pct = 0.0
+
+    if total_incidents > 0:
+        avg_latency_ms = round(
+            sum(inc.latency_ms for inc in INCIDENTS_DB.values()) / total_incidents, 2
+        )
+    else:
+        avg_latency_ms = 0.0
+
+    return {
+        "total_events": total_events,
+        "total_incidents": total_incidents,
+        "noise_suppression_pct": suppression_pct,
+        "avg_latency_ms": avg_latency_ms,
+    }
 
 
 @app.websocket("/ws/alerts")
@@ -372,6 +533,44 @@ async def dispatch_incident(incident_id: str):
     return incident
 
 
+@app.patch("/incidents/{incident_id}/acknowledge", response_model=Incident, tags=["Incidents"])
+async def acknowledge_incident(incident_id: str):
+    """Mark an incident as ACKNOWLEDGED by security operator."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    incident_dict = incident.model_dump()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_dict["status"] = "ACKNOWLEDGED"
+    incident_dict["acknowledged_ts"] = now_iso
+    updated = Incident(**incident_dict)
+    INCIDENTS_DB[incident_id] = updated
+    await manager.broadcast(updated.model_dump())
+    return updated
+
+
+@app.patch("/incidents/{incident_id}/resolve", response_model=Incident, tags=["Incidents"])
+async def resolve_incident(incident_id: str):
+    """Mark an incident as RESOLVED by security operator."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    incident_dict = incident.model_dump()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incident_dict["status"] = "RESOLVED"
+    incident_dict["resolved_ts"] = now_iso
+    updated = Incident(**incident_dict)
+    INCIDENTS_DB[incident_id] = updated
+    await manager.broadcast(updated.model_dump())
+    return updated
+
+
 @app.post("/incidents/{incident_id}/feedback", tags=["Incidents"])
 async def incident_feedback(incident_id: str, feedback: FeedbackBody):
     """
@@ -395,6 +594,55 @@ async def incident_feedback(incident_id: str, feedback: FeedbackBody):
         "message": f"Feedback '{feedback.verdict}' recorded for incident '{incident_id}'.",
         "incident_id": incident_id,
         "verdict": feedback.verdict,
+    }
+
+
+@app.get("/evaluation", tags=["System"])
+def get_evaluation_metrics():
+    """
+    Computes system evaluation metrics based on actual ingested data and feedback:
+    True Positives, False Positives, True Negatives, False Negatives, Precision, Recall, F1, Latencies (p50/p95).
+    """
+    import numpy as np
+
+    total_events = len(EVENTS_DB)
+    incidents = list(INCIDENTS_DB.values())
+    total_incidents = len(incidents)
+
+    tp = sum(1 for inc in incidents if inc.status in ["true_positive", "dispatched", "ACKNOWLEDGED", "RESOLVED"] and inc.score >= 60.0)
+    fp = sum(1 for inc in incidents if inc.status == "false_positive")
+    fn = sum(1 for inc in incidents if inc.score < 60.0 and inc.status != "false_positive")
+    tn = max(0, total_events - (tp + fp + fn))
+
+    precision = round(tp / (tp + fp), 4) if (tp + fp) > 0 else 1.0
+    recall = round(tp / (tp + fn), 4) if (tp + fn) > 0 else 1.0
+    f1_score = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 1.0
+
+    latencies = [inc.latency_ms for inc in incidents if inc.latency_ms > 0]
+    p50_latency = round(float(np.percentile(latencies, 50)), 2) if latencies else 0.0
+    p95_latency = round(float(np.percentile(latencies, 95)), 2) if latencies else 0.0
+    avg_latency = round(float(np.mean(latencies)), 2) if latencies else 0.0
+
+    suppressed = max(0, total_events - total_incidents)
+    suppression_pct = round((suppressed / total_events * 100.0), 2) if total_events > 0 else 0.0
+
+    return {
+        "status": "online",
+        "evaluation": {
+            "true_positives": tp,
+            "false_positives": fp,
+            "true_negatives": tn,
+            "false_negatives": fn,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1_score,
+            "avg_latency_ms": avg_latency,
+            "p50_latency_ms": p50_latency,
+            "p95_latency_ms": p95_latency,
+            "suppression_rate_pct": suppression_pct,
+            "total_events_processed": total_events,
+            "total_incidents_synthesized": total_incidents,
+        },
     }
 
 

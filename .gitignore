@@ -23,3 +23,7 @@ data/*.mov
 .idea/
 .DS_Store
 Thumbs.db
+
+# Temporary clips / test paths
+path/
+

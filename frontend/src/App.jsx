@@ -8,7 +8,7 @@ import { useAlertSocket } from './hooks/useAlertSocket';
 import { Shield, AlertTriangle, Cpu, Radio } from 'lucide-react';
 
 /**
- * App Component - Root Dashboard for Gryffindor Sentinel
+ * App Component - Root Dashboard for Gryffindor
  * 
  * Architecture Overview:
  * 1. Live Data Source:
