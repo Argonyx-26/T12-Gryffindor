@@ -7,6 +7,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Threat classification level
+SeverityLevel = Literal["Critical", "High", "Medium", "Low"]
+
 
 class Event(BaseModel):
     """
@@ -121,7 +124,7 @@ class Incident(BaseModel):
         le=100.0,
         description="Calculated threat severity score between 0 and 100",
     )
-    severity: Literal["Critical", "High", "Medium", "Low"] = Field(
+    severity: SeverityLevel = Field(
         ...,
         description="Threat classification level: Critical, High, Medium, or Low",
     )
@@ -132,6 +135,10 @@ class Incident(BaseModel):
     event_ids: List[str] = Field(
         default_factory=list,
         description="Identifiers of underlying events linked to this incident",
+    )
+    events: Optional[List[Event]] = Field(
+        default=None,
+        description="Full contributing event objects if populated",
     )
     first_ts: str = Field(
         ...,
