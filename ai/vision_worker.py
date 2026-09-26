@@ -6,13 +6,20 @@ This script monitors a video feed (local video file in a continuous loop),
 detects persons using YOLOv8 Nano at a throttled inference rate (~5 FPS),
 checks if any detected person enters a predefined rectangular "tripwire zone",
 and triggers structured intrusion alerts with a 2-second cooldown.
+
+UPDATED: now also captures a real JPEG snapshot of the frame at the moment
+of intrusion, encodes it as base64, and includes it in the event's raw_meta
+as "frame_b64" so the dashboard's Evidence Drawer can show an actual photo
+instead of just bounding-box numbers.
 """
 
+from typing import Optional
 import os
 import sys
 import time
 import uuid
 import json
+import base64
 import argparse
 import threading
 from datetime import datetime, timezone
@@ -49,6 +56,12 @@ ALERT_COOLDOWN_SECONDS = 2.0
 ZONE_ID = "Perimeter_Gate_3"
 GEO_COORDINATES = [12.9716, 77.5946]  # [Latitude, Longitude]
 
+# Snapshot settings: keep this small so it doesn't add noticeable network
+# latency or bloat the event payload. JPEG quality 50 + resized width is
+# plenty for a dashboard thumbnail, not meant for forensic-grade detail.
+SNAPSHOT_MAX_WIDTH = 480
+SNAPSHOT_JPEG_QUALITY = 50
+
 
 # ==============================================================================
 # HELPER FUNCTIONS
@@ -69,7 +82,7 @@ def create_tripwire_zone(frame_width: int, frame_height: int) -> np.ndarray:
     Defines a 4-point polygon representing the rectangular tripwire/restricted zone.
     Here we scale the coordinates relative to the video frame dimensions so that
     it adapts cleanly to any video resolution (e.g. 720p, 1080p, 480p).
-    
+
     Points define a polygon in clockwise order:
     [top-left, top-right, bottom-right, bottom-left]
     """
@@ -100,21 +113,103 @@ def check_point_in_zone(point: tuple, zone_polygon: np.ndarray) -> bool:
     return result >= 0
 
 
-def generate_intrusion_event(confidence: float, bbox: list) -> dict:
+def encode_frame_snapshot(frame: np.ndarray, bbox: Optional[list] = None) -> Optional[str]:
+    """
+    Encodes the given frame as a small base64 JPEG string for the Evidence
+    Drawer. Draws the intrusion bounding box onto the snapshot copy so the
+    saved evidence clearly shows what was detected, without mutating the
+    live display frame used elsewhere in the loop.
+
+    Returns None (and logs a warning) if encoding fails for any reason —
+    this must NEVER crash or block the detection loop.
+    """
+    try:
+        snapshot = frame.copy()
+
+        # Draw the bounding box on the snapshot copy for clarity, if given.
+        if bbox is not None:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            cv2.rectangle(snapshot, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            cv2.putText(
+                snapshot, "INTRUDER", (x1, max(20, y1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA
+            )
+
+        # Resize down for a small, fast-to-transmit thumbnail.
+        h, w = snapshot.shape[:2]
+        if w > SNAPSHOT_MAX_WIDTH:
+            scale = SNAPSHOT_MAX_WIDTH / float(w)
+            snapshot = cv2.resize(
+                snapshot, (SNAPSHOT_MAX_WIDTH, int(h * scale)), interpolation=cv2.INTER_AREA
+            )
+
+        # Encode as JPEG at reduced quality to keep payload size small.
+        success, buffer = cv2.imencode(
+            ".jpg", snapshot, [int(cv2.IMWRITE_JPEG_QUALITY), SNAPSHOT_JPEG_QUALITY]
+        )
+        if not success:
+            print("⚠️ [SNAPSHOT WARNING] JPEG encoding failed, skipping snapshot for this event.", flush=True)
+            return None
+
+        b64_string = base64.b64encode(buffer).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64_string}"
+
+    except Exception as exc:
+        print(f"⚠️ [SNAPSHOT WARNING] Could not encode snapshot: {exc}", flush=True)
+        return None
+
+
+def generate_intrusion_event(
+    confidence: float,
+    bbox: list,
+    frame: Optional[np.ndarray] = None,
+    timing_meta: Optional[dict] = None,
+) -> dict:
     """
     Builds the standardized event dictionary according to the required schema.
+    Now also attaches a base64 JPEG snapshot in raw_meta.frame_b64 when a
+    frame is provided, so the dashboard can show a real photo instead of
+    just bounding-box coordinates.
     """
+    evt_id = f"EVT-CCTV-{uuid.uuid4().hex[:8].upper()}"
+    trc_id = f"TRC-{uuid.uuid4().hex[:12].upper()}"
+
+    raw_meta = {
+        "camera_id": "CAM-01",
+        "site_id": "campus-main",
+        "trace_id": trc_id,
+        "bbox": [int(b) for b in bbox],
+        "location": {
+            "site_id": "campus-main",
+            "zone_id": ZONE_ID,
+            "camera_id": "CAM-01",
+            "latitude": GEO_COORDINATES[0],
+            "longitude": GEO_COORDINATES[1],
+            "location_type": "physical"
+        }
+    }
+
+    # Attach a real snapshot image if a frame was provided. This never
+    # raises — encode_frame_snapshot() returns None on any failure so the
+    # event is still sent successfully even if the snapshot fails.
+    if frame is not None:
+        snapshot_b64 = encode_frame_snapshot(frame, bbox=bbox)
+        raw_meta["frame_b64"] = snapshot_b64 if snapshot_b64 else None
+    else:
+        raw_meta["frame_b64"] = None
+
+    if timing_meta:
+        raw_meta.update(timing_meta)
+
     return {
-        "event_id": str(uuid.uuid4()),
+        "event_id": evt_id,
         "timestamp": get_iso_timestamp(),
         "source_type": "VIDEO",
         "zone_id": ZONE_ID,
         "coordinates": GEO_COORDINATES,
         "event_type": "person_detected",
         "confidence": round(float(confidence), 4),
-        "raw_meta": {
-            "bbox": [int(b) for b in bbox]
-        }
+        "raw_meta": raw_meta,
     }
 
 
@@ -122,14 +217,17 @@ def send_event_to_hub(event: dict) -> None:
     """
     Sends an intrusion event dictionary as an HTTP POST request to {HUB_URL}/ingest
     using the Python 'requests' library in a background daemon thread.
-    
+
     Wrapped in try/except and dispatched asynchronously so network round-trips
-    never block or reduce the video processing frame rate.
+    (including the slightly larger payload from the snapshot image) never
+    block or reduce the video processing frame rate.
     """
     def _worker():
         try:
-            response = requests.post(INGEST_URL, json=event, timeout=3.0)
-            print(f"📡 [HUB RESPONSE] Status {response.status_code}: {response.text.strip()}", flush=True)
+            # Slightly longer timeout since the payload now includes an
+            # image; still small (~10-30 KB) so this should stay fast.
+            response = requests.post(INGEST_URL, json=event, timeout=5.0)
+            print(f"📡 [HUB RESPONSE] Status {response.status_code}: {response.text.strip()[:200]}", flush=True)
         except requests.exceptions.RequestException as exc:
             print(f"⚠️ [HUB ERROR] Failed to send event to Hub at {INGEST_URL}: {exc}", flush=True)
         except Exception as exc:
@@ -169,8 +267,25 @@ def main():
         default=None,
         help="Process YOLO detection every Nth frame (default: auto-calculated for ~5 FPS)"
     )
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Disable sending base64 image snapshots (bbox-only events, smaller/faster payloads)"
+    )
+    parser.add_argument(
+        "--hub-url",
+        default=HUB_URL,
+        help=f"Ingestion Hub URL (default: '{HUB_URL}')"
+    )
     args = parser.parse_args()
     video_source = args.video
+
+    # Update ingestion endpoint if overridden by argument or environment
+    global INGEST_URL
+    INGEST_URL = f"{args.hub_url.rstrip('/')}/ingest"
+
+    # Ensure data/ directory exists
+    os.makedirs("data", exist_ok=True)
 
     # Check if the video source is an integer index (e.g. for webcam: '0')
     if isinstance(video_source, str) and video_source.isdigit():
@@ -180,16 +295,28 @@ def main():
         is_webcam = False
         # 1. Verify Video Source Exists if it's a file
         if not os.path.exists(video_source):
-            print(f"\n[WARNING] Video file not found at: '{video_source}'")
-            print(f"Please place your sample video at '{DEFAULT_VIDEO_PATH}' or specify another file via:")
-            print("   python ai/vision_worker.py --video <path_to_video.mp4>")
-            print("Creating 'data/' folder if it does not already exist...")
-            os.makedirs("data", exist_ok=True)
-            print("Exiting. Place your video and re-run the script.")
-            return
+            if os.path.exists(DEFAULT_VIDEO_PATH):
+                print(f"\n[WARNING] Video file not found at: '{video_source}'")
+                print(f"[INFO] Automatically falling back to demo video at: '{DEFAULT_VIDEO_PATH}'\n")
+                video_source = DEFAULT_VIDEO_PATH
+            else:
+                print(f"\n[WARNING] Video file not found at: '{video_source}'")
+                print("=" * 70)
+                print(" VIDEO SOURCE REQUIRED FOR REAL-TIME CCTV INFERENCE")
+                print("=" * 70)
+                print("Please provide a CCTV video stream or use a live webcam:")
+                print(f"  1. Place a sample video at: '{DEFAULT_VIDEO_PATH}'")
+                print("  2. Specify a video file path:")
+                print("     python ai/vision_worker.py --video path/to/your_video.mp4")
+                print("  3. Use a live webcam stream (device index 0):")
+                print("     python ai/vision_worker.py --video 0")
+                print("=" * 70)
+                print("Exiting gracefully. Re-run after providing a video source.")
+                return
 
     # 2. Ingestion Endpoint Configuration
     print(f"\n[INFO] Central Ingestion Hub: {INGEST_URL}")
+    print(f"[INFO] Snapshot capture: {'DISABLED (--no-snapshot)' if args.no_snapshot else 'ENABLED'}")
 
     # 3. Load YOLOv8 Nano Model
     print(f"[INFO] Loading YOLO model: {MODEL_NAME}...")
@@ -249,6 +376,8 @@ def main():
     try:
         while True:
             frame_start_time = time.time()
+            t_cap_utc = get_iso_timestamp()
+            t_cap_ns = time.perf_counter_ns()
 
             # Step 1: Read a frame from the video
             ret, frame = cap.read()
@@ -283,10 +412,9 @@ def main():
                 latest_detections = []
 
                 # Run inference at reduced image size (320) for 2-3x faster CPU execution:
-                # - imgsz=INFERENCE_IMG_SIZE: Downscale inference to 320 for speed
-                # - classes=[0]: Only detect class 0 ('person' in COCO dataset)
-                # - verbose=False: Suppress default per-frame YOLO printouts
+                t_inf_start_ns = time.perf_counter_ns()
                 results = model(frame, imgsz=INFERENCE_IMG_SIZE, classes=[0], verbose=False)
+                t_inf_end_ns = time.perf_counter_ns()
 
                 # Process detection results
                 for r in results:
@@ -316,12 +444,39 @@ def main():
                             if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
                                 last_alert_time = current_time
 
-                                # Construct the standardized intrusion event dictionary
-                                alert_event = generate_intrusion_event(conf, [x1, y1, x2, y2])
+                                t_evt_gen_ns = time.perf_counter_ns()
+                                t_evt_gen_utc = get_iso_timestamp()
+                                timing_meta = {
+                                    "frame_capture_timestamp_utc": t_cap_utc,
+                                    "event_generation_timestamp_utc": t_evt_gen_utc,
+                                    "frame_capture_monotonic_ns": t_cap_ns,
+                                    "inference_start_ns": t_inf_start_ns,
+                                    "inference_end_ns": t_inf_end_ns,
+                                    "yolo_inference_ms": round((t_inf_end_ns - t_inf_start_ns) / 1e6, 2),
+                                    "event_generation_ns": t_evt_gen_ns,
+                                    "trace_id": f"trc-{uuid.uuid4().hex[:8]}",
+                                }
 
-                                # Print the alert dictionary cleanly formatted to console
+                                # Construct the standardized intrusion event dictionary.
+                                # Pass the raw frame (unless --no-snapshot) so a real
+                                # JPEG snapshot gets attached in raw_meta.frame_b64.
+                                snapshot_frame = None if args.no_snapshot else frame
+                                alert_event = generate_intrusion_event(
+                                    conf, [x1, y1, x2, y2],
+                                    frame=snapshot_frame,
+                                    timing_meta=timing_meta,
+                                )
+
+                                # Print the alert dictionary to console, but omit the
+                                # (potentially large) base64 snapshot string from the
+                                # printed log so the terminal stays readable.
+                                loggable_event = json.loads(json.dumps(alert_event))
+                                if loggable_event.get("raw_meta", {}).get("frame_b64"):
+                                    loggable_event["raw_meta"]["frame_b64"] = (
+                                        f"<base64 JPEG, {len(alert_event['raw_meta']['frame_b64'])} chars>"
+                                    )
                                 print("\n🚨 [INTRUSION ALERT TRIGGERED] 🚨")
-                                print(json.dumps(alert_event, indent=2))
+                                print(json.dumps(loggable_event, indent=2))
 
                                 # Send event as HTTP POST request to {HUB_URL}/ingest
                                 send_event_to_hub(alert_event)
