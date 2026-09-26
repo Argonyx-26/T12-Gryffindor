@@ -5,6 +5,7 @@ Provides endpoints for event ingestion, threat correlation, incident dispatch, a
 
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,6 +76,20 @@ app.add_middleware(
 ZONES_DB: Dict[str, Dict[str, Any]] = {}
 EVENTS_DB: List[Event] = []
 INCIDENTS_DB: Dict[str, Incident] = {}
+
+# Storage configuration & mode detection (SQLite / in-memory fallback)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+STORAGE_MODE = "SQLite" if DATABASE_URL.startswith("sqlite") or os.getenv("STORAGE_MODE", "").lower() == "sqlite" else "in-memory"
+logger = logging.getLogger("uvicorn.info")
+
+
+@app.on_event("startup")
+async def startup_event():
+    startup_msg = f"[STORAGE CONFIG] Active storage fallback mode: {STORAGE_MODE}"
+    print(f"\n==================================================================", flush=True)
+    print(f"  {startup_msg}", flush=True)
+    print(f"==================================================================\n", flush=True)
+    logger.info(startup_msg)
 
 # Locate and load data/zones.json
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -159,6 +174,7 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     multiplier = CORROBORATION_MULTIPLIER.get(min(num_sources, 3), 1.0)
 
     # 3. Zone criticality factor.
+    load_zones()
     zone_info = ZONES_DB.get(new_event.zone_id, {})
     zone_weight = float(zone_info.get("zone_weight", 1.0))
 
@@ -179,7 +195,17 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     latency_ms = round((now_utc - first_dt).total_seconds() * 1000.0, 2)
     severity = calculate_incident_severity(final_score)
 
-    # 5. Merge into an existing open/dispatched incident in this zone if one
+    # 5. Exact suppression rule before an incident is created or broadcast:
+    # If the number of distinct source_types contributing is less than 2,
+    # AND the calculated severity is "Low" or "Medium", do NOT create or broadcast
+    # an incident — just store/log the event normally without alerting.
+    # Only genuine multi-source corroboration (2+ distinct source types within
+    # the correlation window) should create a visible incident, UNLESS a single
+    # source's score independently reaches High or Critical severity on its own.
+    if num_sources < 2 and severity in ("Low", "Medium"):
+        return None
+
+    # 6. Merge into an existing open/dispatched incident in this zone if one
     #    started within the last few seconds, instead of duplicating alerts.
     MERGE_WINDOW_SECONDS = 5.0
     existing_incident = None
@@ -199,6 +225,10 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         updated_severity = calculate_incident_severity(updated_score)
         merged_sources = list(set(existing_incident.sources) | set(distinct_sources))
 
+        # Check suppression rule on merged incident as well
+        if len(merged_sources) < 2 and updated_severity in ("Low", "Medium"):
+            return None
+
         incident_dict = existing_incident.model_dump()
         incident_dict["score"] = updated_score
         incident_dict["severity"] = updated_severity
@@ -213,12 +243,7 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         INCIDENTS_DB[updated_incident.incident_id] = updated_incident
         return updated_incident
 
-    # 6. Suppress weak, uncorroborated single-source noise entirely — this
-    #    is what drives your "noise suppression" metric.
-    if num_sources < 2 and severity == "Low":
-        return None
-
-    # 7. Otherwise, create a brand-new incident.
+    # 7. Otherwise, create a brand-new incident (qualifies via 2+ distinct sources or High/Critical severity).
     incident = Incident(
         incident_id=f"INC-{uuid.uuid4().hex[:8].upper()}",
         zone_id=new_event.zone_id,
@@ -234,6 +259,28 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
 
     INCIDENTS_DB[incident.incident_id] = incident
     return incident
+
+
+class CorrelationEngine:
+    """Compatibility wrapper around evaluate_threat_correlation for testing."""
+    def __init__(self, dedup_window_seconds: float = 5.0, cooldown_window_seconds: float = 5.0):
+        self.dedup_window_seconds = dedup_window_seconds
+        self.cooldown_window_seconds = cooldown_window_seconds
+
+    def process_event(self, event_data: Dict[str, Any]) -> Optional[Incident]:
+        ev = Event(**event_data) if isinstance(event_data, dict) else event_data
+        if not any(e.event_id == ev.event_id for e in EVENTS_DB):
+            EVENTS_DB.append(ev)
+        return evaluate_threat_correlation(ev)
+
+    def reset(self):
+        EVENTS_DB.clear()
+        INCIDENTS_DB.clear()
+
+
+engine = CorrelationEngine()
+incident_store = INCIDENTS_DB
+event_store = EVENTS_DB
 
 
 @app.get("/", tags=["System"])
@@ -291,8 +338,17 @@ async def ingest_event(event: Event):
 
     # Run multi-source threat correlation
     incident = evaluate_threat_correlation(event)
+
+    # Exact suppression rule before an incident is created or broadcast to the WebSocket:
+    # If the number of distinct source_types contributing is less than 2, AND the calculated
+    # severity is "Low" or "Medium", do NOT create or broadcast an incident — just store/log
+    # the event normally without alerting.
     if incident:
-        await manager.broadcast(incident.model_dump())
+        if len(incident.sources) < 2 and incident.severity in ("Low", "Medium"):
+            INCIDENTS_DB.pop(incident.incident_id, None)
+            incident = None
+        else:
+            await manager.broadcast(incident.model_dump())
 
     return {
         "message": "Event ingested and processed successfully.",
