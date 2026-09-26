@@ -11,7 +11,12 @@ import { ShieldAlert, Clock, Radio, Activity, Terminal } from 'lucide-react';
  * 2. Live digital clock that ticks every second via a React useEffect timer
  * 3. System status telemetry indicators (DEFCON level, encryption status, active feed)
  */
-export default function Header({ isConnected = false, threatPosture = 'DEFCON 4 // NOMINAL' }) {
+export default function Header({ 
+  isConnected = false, 
+  threatPosture = 'DEFCON 4 // NOMINAL',
+  apiUrl = '',
+  wsUrl = '',
+}) {
   // Store the current time in React state so the UI automatically re-renders every second
   const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -91,15 +96,21 @@ export default function Header({ isConnected = false, threatPosture = 'DEFCON 4 
               {isConnected ? (
                 <span className="text-emerald-400 flex items-center gap-1.5 font-mono font-semibold">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse inline-block" />
-                  Live
+                  LIVE
                 </span>
               ) : (
                 <span className="text-amber-400 flex items-center gap-1.5 font-mono font-semibold animate-pulse">
                   <span className="w-2 h-2 rounded-full bg-amber-500 inline-block animate-ping" />
-                  Reconnecting...
+                  RECONNECTING
                 </span>
               )}
             </p>
+            {/* Target Endpoints Config Debug Label */}
+            <div className="text-[10px] font-mono text-slate-400 flex items-center gap-2 mt-0.5">
+              <span>API: <span className="text-cyan-400 font-semibold">{apiUrl || 'http://localhost:8000'}</span></span>
+              <span className="text-slate-600">|</span>
+              <span>WS: <span className="text-cyan-400 font-semibold">{wsUrl || 'ws://localhost:8000/ws/alerts'}</span></span>
+            </div>
           </div>
         </div>
 

@@ -3,6 +3,7 @@ import Header from './components/Header';
 import LiveAlertFeed from './components/LiveAlertFeed';
 import EvidenceDrawer from './components/EvidenceDrawer';
 import MapPanel from './components/MapPanel';
+import ActiveResponsePanel from './components/ActiveResponsePanel';
 import { useAlertSocket } from './hooks/useAlertSocket';
 import { Shield, AlertTriangle, Cpu, Radio } from 'lucide-react';
 
@@ -25,10 +26,12 @@ import { Shield, AlertTriangle, Cpu, Radio } from 'lucide-react';
  */
 export default function App() {
   // Connect to the real-time WebSocket alert stream
-  const { alerts, clearAlerts, isConnected, connectionStatus, updateAlertStatus, wsUrl } = useAlertSocket();
+  const { alerts, clearAlerts, isConnected, connectionStatus, updateAlertStatus, wsUrl, apiUrl, loadMockAlerts } = useAlertSocket();
 
   // Track the ID of the currently selected incident card for inspection in Evidence Drawer
   const [selectedAlertId, setSelectedAlertId] = useState(null);
+  // Track whether the Evidence Drawer is open or collapsed
+  const [isDrawerOpen, setIsDrawerOpen] = useState(true);
 
   // Derive the active alert object from the live list.
   // If user selected an ID, find it in the current alerts list (ensuring updated status is reflected).
@@ -43,20 +46,32 @@ export default function App() {
     return alerts[0] || null;
   }, [alerts, selectedAlertId]);
 
-  // Handler when user clicks an alert card in the feed
+  // Handler when user clicks an alert card in the feed, map marker, or "VIEW EVIDENCE" on Active Response Panel
   const handleSelectAlert = (alert) => {
+    if (!alert) return;
     setSelectedAlertId(alert.incident_id);
+    setIsDrawerOpen(true);
+    // Smoothly scroll down to the Evidence Drawer
+    setTimeout(() => {
+      const el = document.getElementById('evidence-drawer');
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }, 50);
   };
 
   // Handler to close or collapse the evidence drawer
   const handleCloseDrawer = () => {
-    setSelectedAlertId(null);
+    setIsDrawerOpen(false);
   };
 
-  // Compute threat posture dynamically from live alerts (excluding false positives)
-  const activeAlerts = alerts.filter(a => a.status !== 'false_positive');
-  const criticalCount = activeAlerts.filter(a => a.severity === 'Critical').length;
-  const highCount = activeAlerts.filter(a => a.severity === 'High').length;
+  // Compute threat posture dynamically from live alerts (excluding false positives and resolved)
+  const activeAlerts = alerts.filter(a => {
+    const s = String(a.status || '').toLowerCase();
+    return s !== 'false_positive' && s !== 'resolved' && s !== 'closed';
+  });
+  const criticalCount = activeAlerts.filter(a => String(a.severity || '').toLowerCase() === 'critical' || Number(a.score) >= 85).length;
+  const highCount = activeAlerts.filter(a => String(a.severity || '').toLowerCase() === 'high' || (Number(a.score) >= 70 && Number(a.score) < 85)).length;
   const threatPosture = criticalCount > 0
     ? 'DEFCON 1 // CRITICAL'
     : highCount > 0
@@ -69,11 +84,19 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-red-600 selection:text-white">
       
       {/* 1. Tactical Header with Live Clock & WebSocket Indicator */}
-      <Header isConnected={isConnected} threatPosture={threatPosture} />
+      <Header isConnected={isConnected} threatPosture={threatPosture} apiUrl={apiUrl} wsUrl={wsUrl} />
 
       {/* 2. Main Dashboard Content Grid */}
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 md:p-6 flex flex-col gap-6">
         
+        {/* Full-Width Active Emergency Response Panel (Appears only on active Critical/High alerts) */}
+        <ActiveResponsePanel
+          alerts={alerts}
+          onSelectAlert={handleSelectAlert}
+          onUpdateStatus={updateAlertStatus}
+          apiUrl={apiUrl}
+        />
+
         {/* Top Operational Status Bar */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="bg-slate-900/60 border border-slate-800/80 p-3 rounded-lg flex items-center gap-3">
@@ -141,7 +164,7 @@ export default function App() {
               <span className={`text-sm font-bold font-mono ${
                 isConnected ? 'text-emerald-400' : 'text-amber-400'
               }`}>
-                {isConnected ? 'STREAM CONNECTED' : 'RECONNECTING (3s)'}
+                {isConnected ? 'LIVE' : 'RECONNECTING (3s)'}
               </span>
             </div>
           </div>
@@ -155,24 +178,31 @@ export default function App() {
             {/* Live Alert Feed Connected to useAlertSocket */}
             <LiveAlertFeed
               alerts={alerts}
-              selectedAlertId={activeAlert ? activeAlert.incident_id : null}
+              selectedAlertId={isDrawerOpen && activeAlert ? activeAlert.incident_id : null}
               onSelectAlert={handleSelectAlert}
               onUpdateStatus={updateAlertStatus}
               onClearAlerts={clearAlerts}
+              onLoadDemoAlerts={loadMockAlerts}
               connectionStatus={connectionStatus}
               isConnected={isConnected}
             />
 
             {/* Evidence Drawer (renders below the alert feed) */}
             <EvidenceDrawer
-              selectedAlert={activeAlert}
+              selectedAlert={isDrawerOpen ? activeAlert : null}
               onClose={handleCloseDrawer}
+              apiUrl={apiUrl}
             />
           </div>
 
           {/* Right Column: Situational Map Panel (7 cols on lg) */}
           <div className="lg:col-span-7 h-full">
-            <MapPanel />
+            <MapPanel
+              alerts={alerts}
+              selectedAlert={activeAlert}
+              onSelectAlert={handleSelectAlert}
+              apiUrl={apiUrl}
+            />
           </div>
 
         </div>
@@ -181,10 +211,13 @@ export default function App() {
 
       {/* 3. Bottom Tactical Status Ticker */}
       <footer className="bg-slate-950 border-t border-slate-900 px-4 py-2 text-[11px] font-mono text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <span className="text-slate-400">GRYFFINDOR KERNEL v2.4</span>
           <span className="text-slate-700">|</span>
-          <span className="text-emerald-400">FUSION BUS: {wsUrl}</span>
+          <span className="text-slate-400">CONFIG:</span>
+          <span className="text-cyan-400">API: {apiUrl}</span>
+          <span className="text-slate-700">|</span>
+          <span className="text-cyan-400">WS: {wsUrl}</span>
         </div>
         <div className="text-slate-600">
           SECURE PROTOCOL CLASSIFIED // INTERNAL COMMAND AUTHORIZED

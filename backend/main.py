@@ -25,9 +25,8 @@ from backend.constants import (
     SEVERITY_THRESHOLDS,
     SOURCE_WEIGHTS,
 )
-from backend.models import Event, Incident
+from backend.models import Event, Incident, SeverityLevel
 from backend.scoring_engine import ScoringEngine
-
 
 # Feedback schema for operator action
 class FeedbackBody(BaseModel):
@@ -120,7 +119,7 @@ def parse_iso(ts_str: str) -> datetime:
     return dt
 
 
-def calculate_incident_severity(score: float) -> str:
+def calculate_incident_severity(score: float) -> SeverityLevel:
     """Classify incident severity according to defined thresholds."""
     if score >= SEVERITY_THRESHOLDS["Critical"]:
         return "Critical"
@@ -237,6 +236,7 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
         severity=severity,
         sources=distinct_sources,
         event_ids=[e.event_id for e in correlated_events],
+        events=correlated_events,
         first_ts=first_event.timestamp,
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
@@ -407,6 +407,25 @@ def get_incident(incident_id: str):
             detail=f"Incident '{incident_id}' not found.",
         )
     return INCIDENTS_DB[incident_id]
+
+
+@app.get("/incidents/{incident_id}/events", response_model=List[Event], tags=["Incidents"])
+def get_incident_events(incident_id: str):
+    """Fetch the full contributing Event objects for a specific incident."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    incident = INCIDENTS_DB[incident_id]
+    event_ids_set = set(incident.event_ids)
+    matching_events = [e for e in EVENTS_DB if e.event_id in event_ids_set]
+    # If no events matched by ID (e.g. historical or after reload), fallback to embedded incident.events or zone events
+    if not matching_events and incident.events:
+        matching_events = incident.events
+    if not matching_events:
+        matching_events = [e for e in EVENTS_DB if e.zone_id == incident.zone_id][-10:]
+    return matching_events
 
 
 @app.patch("/incidents/{incident_id}/status", response_model=Incident, tags=["Incidents"])
