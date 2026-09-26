@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-25T21:47:33.296929+00:00",
+  "timestamp": "2026-09-25T22:22:58.113667+00:00",
   "tests": [
     {
       "id": 1,
@@ -23,7 +23,7 @@
       "id": 4,
       "name": "PostgreSQL Authoritative Persistence & Junction Lookup",
       "status": "PASS",
-      "detail": "DB Record: INC-F9885142, Junctions: 3"
+      "detail": "DB Record: INC-1387E7E4, Junctions: 3"
     },
     {
       "id": 5,
@@ -47,7 +47,7 @@
       "id": 8,
       "name": "Database Restart Recovery (State Reload)",
       "status": "PASS",
-      "detail": "Reloaded events: 959, incs: 163"
+      "detail": "Reloaded events: 1341, incs: 249"
     },
     {
       "id": 9,
@@ -95,7 +95,7 @@
       "id": 16,
       "name": "End-to-End Trace ID (trc-...) Propagation",
       "status": "PASS",
-      "detail": "Evt Trace: trc-a6746faf, Inc Trace: trc-a6746faf"
+      "detail": "Evt Trace: trc-08646b84, Inc Trace: trc-08646b84"
     },
     {
       "id": 17,
@@ -107,13 +107,13 @@
       "id": 18,
       "name": "Controlled Load & Burst Rate Test",
       "status": "PASS",
-      "detail": "Load test throughput breakdown: ['10_eps: 27.36 eps', '25_eps: 25.16 eps', '50_eps: 17.72 eps', '100_eps: 20.31 eps']"
+      "detail": "Load test throughput breakdown: ['10_eps: 29.28 eps', '25_eps: 24.33 eps', '50_eps: 18.55 eps', '100_eps: 18.86 eps']"
     },
     {
       "id": 19,
       "name": "Longer-run Memory & Stability Monitoring",
       "status": "PASS",
-      "detail": "Memory RSS: 111.71 MB, CPU: 0.0%"
+      "detail": "Memory RSS: 115.22 MB, CPU: 0.0%"
     },
     {
       "id": 20,
@@ -175,19 +175,19 @@
         "sample_count": 0
       },
       "4_intelligence_processing": {
-        "average": 15.71,
-        "p50": 11.06,
-        "p95": 20.35,
-        "min": 11.06,
-        "max": 20.35,
+        "average": 9.9,
+        "p50": 9.68,
+        "p95": 10.13,
+        "min": 9.68,
+        "max": 10.13,
         "sample_count": 2
       },
       "5_alert_emission": {
-        "average": 0.14,
-        "p50": 0.12,
-        "p95": 0.16,
-        "min": 0.12,
-        "max": 0.16,
+        "average": 0.09,
+        "p50": 0.08,
+        "p95": 0.11,
+        "min": 0.08,
+        "max": 0.11,
         "sample_count": 2
       },
       "total_end_to_end": {
@@ -224,30 +224,30 @@
     "10_eps": {
       "requested_rate": 10,
       "processed_events": 10,
-      "total_duration_seconds": 0.3654,
-      "actual_throughput_eps": 27.36,
-      "avg_ingestion_latency_ms": 36.54
+      "total_duration_seconds": 0.3415,
+      "actual_throughput_eps": 29.28,
+      "avg_ingestion_latency_ms": 34.15
     },
     "25_eps": {
       "requested_rate": 25,
       "processed_events": 25,
-      "total_duration_seconds": 0.9935,
-      "actual_throughput_eps": 25.16,
-      "avg_ingestion_latency_ms": 39.74
+      "total_duration_seconds": 1.0273,
+      "actual_throughput_eps": 24.33,
+      "avg_ingestion_latency_ms": 41.09
     },
     "50_eps": {
       "requested_rate": 50,
       "processed_events": 50,
-      "total_duration_seconds": 2.8213,
-      "actual_throughput_eps": 17.72,
-      "avg_ingestion_latency_ms": 56.43
+      "total_duration_seconds": 2.6949,
+      "actual_throughput_eps": 18.55,
+      "avg_ingestion_latency_ms": 53.9
     },
     "100_eps": {
       "requested_rate": 100,
       "processed_events": 100,
-      "total_duration_seconds": 4.9241,
-      "actual_throughput_eps": 20.31,
-      "avg_ingestion_latency_ms": 49.24
+      "total_duration_seconds": 5.3013,
+      "actual_throughput_eps": 18.86,
+      "avg_ingestion_latency_ms": 53.01
     }
   },
   "evaluation_metrics": {
@@ -258,7 +258,7 @@
     "precision": 1.0,
     "recall": 1.0,
     "f1_score": 1.0,
-    "avg_intelligence_processing_latency_ms": 20.85,
+    "avg_intelligence_processing_latency_ms": 22.47,
     "noise_suppression_rate_pct": 70.0
   },
   "confusion_matrix": {
@@ -268,9 +268,9 @@
     "false_negatives": 0
   },
   "stability_metrics": {
-    "memory_rss_mb": 111.71,
+    "memory_rss_mb": 115.22,
     "cpu_percent": 0.0,
-    "active_events_in_mem": 1146,
-    "active_incidents_in_mem": 173
+    "active_events_in_mem": 1528,
+    "active_incidents_in_mem": 259
   }
 }

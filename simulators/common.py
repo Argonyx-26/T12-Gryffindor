@@ -17,6 +17,7 @@ if SHARED_DIR not in sys.path:
 try:
     from shared.clock import now_utc_iso, sync_clock
 except ImportError:
+    # pyrefly: ignore [missing-import]
     from clock import now_utc_iso, sync_clock  # noqa: E402
 
 HUB_URL = os.getenv("HUB_URL", "http://127.0.0.1:8000")

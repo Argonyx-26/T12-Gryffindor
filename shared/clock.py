@@ -8,6 +8,7 @@ import time
 import os
 from datetime import datetime, timezone
 
+# pyrefly: ignore [missing-source-for-stubs]
 import requests
 
 _offset = 0.0

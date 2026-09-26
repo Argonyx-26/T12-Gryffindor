@@ -105,13 +105,26 @@ def generate_intrusion_event(confidence: float, bbox: list, timing_meta: Optiona
     """
     Builds the standardized event dictionary according to the required schema.
     """
+    evt_id = f"EVT-CCTV-{uuid.uuid4().hex[:8].upper()}"
+    trc_id = f"TRC-{uuid.uuid4().hex[:12].upper()}"
     raw_meta = {
-        "bbox": [int(b) for b in bbox]
+        "camera_id": "CAM-01",
+        "site_id": "campus-main",
+        "trace_id": trc_id,
+        "bbox": [int(b) for b in bbox],
+        "location": {
+            "site_id": "campus-main",
+            "zone_id": ZONE_ID,
+            "camera_id": "CAM-01",
+            "latitude": GEO_COORDINATES[0],
+            "longitude": GEO_COORDINATES[1],
+            "location_type": "physical"
+        }
     }
     if timing_meta:
         raw_meta.update(timing_meta)
     return {
-        "event_id": str(uuid.uuid4()),
+        "event_id": evt_id,
         "timestamp": get_iso_timestamp(),
         "source_type": "VIDEO",
         "zone_id": ZONE_ID,
@@ -175,6 +188,8 @@ def main():
     )
     args = parser.parse_args()
     video_source = args.video
+    # Ensure data/ directory exists
+    os.makedirs("data", exist_ok=True)
 
     # Check if the video source is an integer index (e.g. for webcam: '0')
     if isinstance(video_source, str) and video_source.isdigit():
@@ -185,11 +200,17 @@ def main():
         # 1. Verify Video Source Exists if it's a file
         if not os.path.exists(video_source):
             print(f"\n[WARNING] Video file not found at: '{video_source}'")
-            print(f"Please place your sample video at '{DEFAULT_VIDEO_PATH}' or specify another file via:")
-            print("   python ai/vision_worker.py --video <path_to_video.mp4>")
-            print("Creating 'data/' folder if it does not already exist...")
-            os.makedirs("data", exist_ok=True)
-            print("Exiting. Place your video and re-run the script.")
+            print("=" * 70)
+            print(" VIDEO SOURCE REQUIRED FOR REAL-TIME CCTV INFERENCE")
+            print("=" * 70)
+            print("Please provide a CCTV video stream or use a live webcam:")
+            print(f"  1. Place a sample video at: '{DEFAULT_VIDEO_PATH}'")
+            print("  2. Specify a video file path:")
+            print("     python ai/vision_worker.py --video path/to/your_video.mp4")
+            print("  3. Use a live webcam stream (device index 0):")
+            print("     python ai/vision_worker.py --video 0")
+            print("=" * 70)
+            print("Exiting gracefully. Re-run after providing a video source.")
             return
 
     # 2. Ingestion Endpoint Configuration

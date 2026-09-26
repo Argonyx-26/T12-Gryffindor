@@ -119,7 +119,6 @@ class ScoringEngine:
 
             modality_scores[src] = round(best_event_contrib, 2)
 
-<<<<<<< HEAD
         # ----------------------------------------------------------------------
         # Phase 3B Temporal & Behavioral Intelligence Layer
         # ----------------------------------------------------------------------
@@ -166,10 +165,6 @@ class ScoringEngine:
 
         base_sum = sum(modality_scores.values())
         raw_scaled = (base_sum + pattern_bonus + anomaly_bonus) * corr_multiplier * (zone_weight / 1.5)
-=======
-        base_sum = sum(modality_scores.values())
-        raw_scaled = base_sum * corr_multiplier * (zone_weight / 1.5)
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
         final_score = round(min(100.0, max(0.0, raw_scaled)), 2)
 
         if num_sources > 1:
@@ -182,7 +177,6 @@ class ScoringEngine:
             if factor_msg not in contributing_factors:
                 contributing_factors.append(factor_msg)
 
-<<<<<<< HEAD
         # Generate XAI Plain English Explanation
         if matched_patterns and num_sources >= 2:
             pat_names = ", ".join([p["pattern_name"] for p in matched_patterns])
@@ -206,21 +200,6 @@ class ScoringEngine:
             "temporal_pattern_bonus": pattern_bonus,
             "behavioral_anomaly_bonus": anomaly_bonus,
             "recency_factor": recency_factor,
-=======
-        # Generate human-readable explanation
-        explanation = (
-            f"Correlated {len(correlated_events)} security event(s) across {num_sources} modality source(s) "
-            f"({', '.join(distinct_sources)}) in zone '{zone_info.get('name', correlated_events[0].zone_id)}' "
-            f"with corroboration multiplier {corr_multiplier}x."
-        )
-
-        # Build score breakdown dict
-        score_breakdown = {
-            "modality_contributions": modality_scores,
-            "corroboration_multiplier": corr_multiplier,
-            "zone_weight": zone_weight,
-            "raw_base_sum": round(base_sum, 2),
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
             "final_score": final_score,
         }
 
@@ -286,7 +265,6 @@ class ScoringEngine:
             new_timeline.append(entry)
             existing_event_ids.add(ev.event_id)
 
-<<<<<<< HEAD
         from backend.temporal_engine import SequencePatternEngine
         matched_patterns = SequencePatternEngine.evaluate_sequence_patterns(correlated_events)
         for pat in matched_patterns:
@@ -299,8 +277,6 @@ class ScoringEngine:
                     "description": pat_msg,
                 })
 
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
         now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         engine_entry_msg = f"ENGINE: Threat score evaluated as {score} ({severity})"
         if not any(t.get("description") == engine_entry_msg for t in new_timeline):
@@ -311,9 +287,5 @@ class ScoringEngine:
                 "description": engine_entry_msg,
             })
 
-<<<<<<< HEAD
         # Ensure timeline remains strictly chronological by timestamp
         return sorted(new_timeline, key=lambda x: str(x.get("timestamp", "")))
-=======
-        return new_timeline
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0

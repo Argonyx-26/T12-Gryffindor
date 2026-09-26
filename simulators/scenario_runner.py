@@ -141,6 +141,28 @@ def run_replay(path: str, speed: float = 1.0):
     print("[replay] done")
 
 
+def get_incident_count() -> int:
+    """Helper to fetch total incident count from backend API."""
+    try:
+        r = requests.get(f"{HUB_URL.rstrip('/')}/incidents", timeout=2.0)
+        if r.status_code == 200:
+            return len(r.json())
+    except Exception:
+        pass
+    return 0
+
+
+def get_latest_incident() -> dict:
+    """Helper to fetch latest incident from backend API."""
+    try:
+        r = requests.get(f"{HUB_URL.rstrip('/')}/incidents", timeout=2.0)
+        if r.status_code == 200 and r.json():
+            return r.json()[-1]
+    except Exception:
+        pass
+    return {}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--act", type=int, choices=[1, 2, 3], help="run only this act")
@@ -162,16 +184,56 @@ if __name__ == "__main__":
 
     try:
         if args.act == 1:
+            c_before = get_incident_count()
             act1_baseline()
+            c_after = get_incident_count()
+            print(f"\n[SUMMARY] ACT 1 Incidents Triggered: {c_after - c_before} (Expected: 0)")
         elif args.act == 2:
+            c_before = get_incident_count()
             act2_suppressed_noise(mock_cctv=args.mock_cctv)
+            c_after = get_incident_count()
+            print(f"\n[SUMMARY] ACT 2 Incidents Triggered: {c_after - c_before} (Expected: 0)")
         elif args.act == 3:
+            c_before = get_incident_count()
             act3_multi_vector_breach(zone_id=args.zone, mock_cctv=args.mock_cctv)
+            time.sleep(1.0)
+            c_after = get_incident_count()
+            latest = get_latest_incident()
+            print(f"\n[SUMMARY] ACT 3 Incidents Triggered: {c_after - c_before} (Expected: 1 Critical)")
+            if latest:
+                print(f"[SUMMARY] ACT 3 Incident ID: {latest.get('incident_id')} | Score: {latest.get('score')} | Severity: {latest.get('severity')} | Sources: {latest.get('sources')}")
         else:
-            act1_baseline(duration_s=15)
+            c0 = get_incident_count()
+            act1_baseline(duration_s=10)
+            c1 = get_incident_count()
+
             act2_suppressed_noise(mock_cctv=args.mock_cctv)
-            time.sleep(2)
+            time.sleep(1.0)
+            c2 = get_incident_count()
+
             act3_multi_vector_breach(zone_id=args.zone, mock_cctv=args.mock_cctv)
+            time.sleep(1.5)
+            c3 = get_incident_count()
+
+            latest = get_latest_incident()
+
+            act1_new = c1 - c0
+            act2_new = c2 - c1
+            act3_new = c3 - c2
+
+            print("\n" + "=" * 75)
+            print(" 🎯 GRYFFINDOR SENTINEL — THREE-ACT DEMO FINAL SUMMARY")
+            print("=" * 75)
+            print(f" ACT 1 (Baseline Ambient Traffic):      {act1_new} Incidents Triggered (Expected: 0)")
+            print(f" ACT 2 (Suppressed Noise Signals):      {act2_new} Incidents Triggered (Expected: 0)")
+            print(f" ACT 3 (Multi-Vector Corroboration):     {act3_new} Incident(s) Triggered (Expected: 1 Critical)")
+            if latest:
+                print(f"        └─ Breach Incident ID:        {latest.get('incident_id')}")
+                print(f"        └─ Threat Score:             {latest.get('score')} / 100")
+                print(f"        └─ Severity Rating:          {latest.get('severity')}")
+                print(f"        └─ Corroborated Sources:     {latest.get('sources')}")
+            print("=" * 75 + "\n")
+
     finally:
         if args.record:
             close_recording()

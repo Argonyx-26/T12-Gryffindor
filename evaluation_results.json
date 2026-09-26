@@ -9,7 +9,7 @@
     "precision": 1.0,
     "recall": 1.0,
     "f1_score": 1.0,
-    "avg_intelligence_processing_latency_ms": 20.85,
+    "avg_intelligence_processing_latency_ms": 22.47,
     "noise_suppression_rate_pct": 70.0
   },
   "confusion_matrix": {

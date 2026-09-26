@@ -183,9 +183,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
   const isFalsePositive = status === 'false_positive';
   const isAcknowledged = status === 'ACKNOWLEDGED';
   const isResolved = status === 'RESOLVED';
-<<<<<<< HEAD
-=======
-
   // Dynamic description logic:
   // If 1 source: "Single-source detection: [source]"
   // If 2+ sources: "Corroborated multi-vector detection across: [sources]"
@@ -215,7 +212,6 @@ export default function AlertCard({ alert, isSelected, onSelect, onUpdateStatus 
   };
 
   const displayDescription = getDisplayDescription();
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
 
   return (
     <div

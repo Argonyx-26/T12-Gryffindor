@@ -42,6 +42,7 @@ from backend.db_models import (
 from backend.models import Event, Incident
 from backend.redis_client import REDIS_CLIENT
 from backend.scoring_engine import ScoringEngine
+from backend.location_config import get_event_location, get_incident_primary_location, get_all_locations_payload
 
 logger = logging.getLogger("sentinel.main")
 
@@ -291,6 +292,19 @@ def startup_event():
     init_db()
     load_state_from_db()
 
+    db_mode = "PostgreSQL" if ("postgresql" in settings.DATABASE_URL.lower() and check_db_connection()) else "SQLite / In-Memory (Fallback)"
+    redis_mode = "Redis Server" if REDIS_CLIENT.is_connected else "In-Memory Active Cache (Fallback)"
+
+    print("\n" + "=" * 70, flush=True)
+    print(" 🚀 GRYFFINDOR SENTINEL INTELLIGENCE BACKEND ONLINE", flush=True)
+    print("=" * 70, flush=True)
+    print(f" 💾 Database Engine:   {db_mode}", flush=True)
+    print(f" ⚡ Real-Time Cache:   {redis_mode}", flush=True)
+    print(f" 📡 Ingestion Hub:     http://localhost:8000/ingest", flush=True)
+    print(f" 🗺️ Geospatial Catalog: http://localhost:8000/locations", flush=True)
+    print(f" 🔌 Live WebSocket Bus: ws://localhost:8000/ws/alerts", flush=True)
+    print("=" * 70 + "\n", flush=True)
+
 
 def parse_iso(ts_str: str) -> datetime:
     """Parse ISO-8601 string to aware datetime in UTC."""
@@ -396,6 +410,8 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
             trace_id = ev.raw_meta["trace_id"]
             break
 
+    loc_info = get_incident_primary_location(existing_incident or new_event, correlated_events)
+
     if existing_incident:
         # De-duplicate & update existing incident
         updated_dict = existing_incident.model_dump()
@@ -411,6 +427,7 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         updated_dict["confidence_summary"] = avg_conf
         updated_dict["correlation_summary"] = corr_summary
         updated_dict["recommendations"] = recommendations
+        updated_dict["location"] = loc_info
         updated_dict["timeline"] = ScoringEngine.build_timeline(
             existing_incident.timeline, correlated_events, existing_incident.incident_id, updated_dict["score"], updated_dict["severity"]
         )
@@ -428,53 +445,14 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
     new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
     timeline = ScoringEngine.build_timeline([], correlated_events, new_inc_id, final_score, severity)
 
-    # 5. Merge into an existing open/dispatched incident in this zone if one
-    #    started within the last few seconds, instead of duplicating alerts.
-    MERGE_WINDOW_SECONDS = 5.0
-    existing_incident = None
-    for inc in INCIDENTS_DB.values():
-        if inc.zone_id != new_event.zone_id:
-            continue
-        if inc.status not in ("open", "dispatched"):
-            continue
-        inc_first_dt = parse_iso(inc.first_ts)
-        if abs((new_event_dt - inc_first_dt).total_seconds()) <= MERGE_WINDOW_SECONDS:
-            existing_incident = inc
-            break
-
-    if existing_incident:
-        merged_event_ids = list(set(existing_incident.event_ids) | set(all_event_ids))
-        updated_score = max(existing_incident.score, final_score)
-        updated_severity = calculate_incident_severity(updated_score)
-        merged_sources = list(set(existing_incident.sources) | set(distinct_sources))
-
-        incident_dict = existing_incident.model_dump()
-        incident_dict["score"] = updated_score
-        incident_dict["severity"] = updated_severity
-        incident_dict["sources"] = merged_sources
-        incident_dict["event_ids"] = merged_event_ids
-        incident_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
-        if updated_severity in ("Critical", "High") and not incident_dict.get("dispatch_ts"):
-            incident_dict["dispatch_ts"] = now_utc.isoformat()
-            incident_dict["status"] = "dispatched"
-
-        updated_incident = Incident(**incident_dict)
-        INCIDENTS_DB[updated_incident.incident_id] = updated_incident
-        return updated_incident
-
-    # 6. Suppress weak, uncorroborated single-source noise entirely — this
-    #    is what drives your "noise suppression" metric.
-    if num_sources < 2 and severity == "Low":
-        return None
-
-    # 7. Otherwise, create a brand-new incident.
+    # Create brand-new incident
     incident = Incident(
         incident_id=new_inc_id,
         zone_id=new_event.zone_id,
         score=final_score,
         severity=severity,
         sources=distinct_sources,
-        event_ids=all_event_ids,
+        event_ids=[e.event_id for e in correlated_events],
         first_ts=first_event.timestamp,
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
@@ -487,6 +465,7 @@ def evaluate_threat_correlation(new_event: Event, ingest_ns: Optional[int] = Non
         correlation_summary=corr_summary,
         timeline=timeline,
         recommendations=recommendations,
+        location=loc_info,
     )
 
     INCIDENTS_DB[incident.incident_id] = incident
@@ -512,7 +491,6 @@ def root():
     }
 
 
-<<<<<<< HEAD
 @app.get("/health", tags=["System"])
 def get_health():
     """Detailed system connectivity and health status endpoint."""
@@ -532,6 +510,12 @@ def get_health():
 def get_time():
     """Clock sync endpoint returning current epoch timestamp."""
     return {"epoch": time.time()}
+
+
+@app.get("/locations", tags=["Geospatial"])
+def get_locations():
+    """Returns catalog of configured cameras, sensors, cyber nodes, and zone geometries."""
+    return get_all_locations_payload()
 
 
 @app.get("/cctv/status", tags=["CCTV"])
@@ -610,8 +594,13 @@ def get_metrics():
     total_incidents = len(INCIDENTS_DB)
     suppressed = max(0, total_events - total_incidents)
     suppression_pct = (suppressed / total_events * 100.0) if total_events > 0 else 0.0
+    avg_latency = round(sum(inc.latency_ms for inc in INCIDENTS_DB.values()) / total_incidents, 2) if total_incidents > 0 else 0.0
     return {
         "status": "online",
+        "total_events": total_events,
+        "total_incidents": total_incidents,
+        "noise_suppression_pct": round(suppression_pct, 2),
+        "avg_latency_ms": avg_latency,
         "monitored_zones": len(ZONES_DB),
         "ingested_events": total_events,
         "active_incidents": total_incidents,
@@ -754,7 +743,6 @@ def list_incidents(
     page: Optional[int] = Query(None, ge=1, description="Page number for pagination"),
     limit: int = Query(50, ge=1, le=500, description="Items per page"),
 ):
-<<<<<<< HEAD
     """
     Retrieve threat incidents. Returns List[Incident] when unpaginated, or paginated Dict when page is specified.
     """
@@ -813,15 +801,6 @@ def list_incidents(
             }
 
         return incidents
-=======
-    """Retrieve all synthesized threat incidents."""
-    incidents = list(INCIDENTS_DB.values())
-    if severity:
-        incidents = [inc for inc in incidents if inc.severity.lower() == severity.lower()]
-    if status_filter:
-        incidents = [inc for inc in incidents if inc.status.lower() == status_filter.lower()]
-    return incidents
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
 
 
 @app.get("/incidents/{incident_id}", response_model=Incident, tags=["Incidents"])
@@ -879,34 +858,7 @@ def update_incident_status(
     return updated_incident
 
 
-@app.get("/metrics", tags=["System"])
-def get_metrics():
-    """
-    Returns headline demo metrics: total events, total incidents,
-    noise suppression percentage, and average incident latency.
-    """
-    total_events = len(EVENTS_DB)
-    total_incidents = len(INCIDENTS_DB)
-    if total_events > 0:
-        suppression_pct = round(
-            (1 - (total_incidents / total_events)) * 100.0, 2
-        )
-    else:
-        suppression_pct = 0.0
 
-    if total_incidents > 0:
-        avg_latency_ms = round(
-            sum(inc.latency_ms for inc in INCIDENTS_DB.values()) / total_incidents, 2
-        )
-    else:
-        avg_latency_ms = 0.0
-
-    return {
-        "total_events": total_events,
-        "total_incidents": total_incidents,
-        "noise_suppression_pct": suppression_pct,
-        "avg_latency_ms": avg_latency_ms,
-    }
 
 
 @app.websocket("/ws/alerts")
@@ -982,13 +934,32 @@ async def acknowledge_incident(incident_id: str):
     incident_dict["acknowledged_ts"] = now_iso
     updated = Incident(**incident_dict)
     INCIDENTS_DB[incident_id] = updated
-<<<<<<< HEAD
     persist_incident_to_db(updated)
     log_audit_action("incident_acknowledged", incident_id, {"acknowledged_ts": now_iso})
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     await manager.broadcast(updated.model_dump())
     return updated
+
+
+@app.get("/incidents/{incident_id}/explanation", tags=["Incidents"])
+def get_incident_explanation(incident_id: str):
+    """Retrieve detailed XAI explanation for an incident."""
+    if incident_id not in INCIDENTS_DB:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found.",
+        )
+    inc = INCIDENTS_DB[incident_id]
+    return {
+        "incident_id": inc.incident_id,
+        "score": inc.score,
+        "severity": inc.severity,
+        "explanation": inc.explanation,
+        "contributing_factors": inc.contributing_factors,
+        "score_breakdown": inc.score_breakdown,
+        "confidence_summary": inc.confidence_summary,
+        "correlation_summary": inc.correlation_summary,
+        "recommendations": inc.recommendations,
+    }
 
 
 @app.patch("/incidents/{incident_id}/resolve", response_model=Incident, tags=["Incidents"])
@@ -1006,11 +977,8 @@ async def resolve_incident(incident_id: str):
     incident_dict["resolved_ts"] = now_iso
     updated = Incident(**incident_dict)
     INCIDENTS_DB[incident_id] = updated
-<<<<<<< HEAD
     persist_incident_to_db(updated)
     log_audit_action("incident_resolved", incident_id, {"resolved_ts": now_iso})
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
     await manager.broadcast(updated.model_dump())
     return updated
 
@@ -1044,7 +1012,6 @@ async def incident_feedback(incident_id: str, feedback: FeedbackBody):
     }
 
 
-<<<<<<< HEAD
 @app.post("/admin/cleanup", tags=["System"])
 def cleanup_retention():
     """Configurable retention cleanup for events and resolved/false_positive incidents."""
@@ -1083,8 +1050,6 @@ def cleanup_retention():
     }
 
 
-=======
->>>>>>> 36887e41dc7a1241b44edbd31892a5d1be9a39c0
 @app.get("/evaluation", tags=["System"])
 def get_evaluation_metrics():
     """

@@ -172,7 +172,12 @@ export default function App() {
 
           {/* Right Column: Situational Map Panel (7 cols on lg) */}
           <div className="lg:col-span-7 h-full">
-            <MapPanel />
+            <MapPanel
+              activeIncidents={alerts}
+              selectedIncident={activeAlert}
+              onSelectIncident={handleSelectAlert}
+              isConnected={isConnected}
+            />
           </div>
 
         </div>
