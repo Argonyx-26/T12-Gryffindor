@@ -4,14 +4,14 @@
     "name": "Central Server & Data Facility",
     "latitude": 37.4282,
     "longitude": -122.1688,
-    "zone_weight": 1.05
+    "zone_weight": 1.02
   },
   {
     "id": "Perimeter_Gate_3",
     "name": "North Campus Perimeter Gate 3",
     "latitude": 37.4320,
     "longitude": -122.1745,
-    "zone_weight": 1.0
+    "zone_weight": 0.95
   },
   {
     "id": "Parking_Lot",

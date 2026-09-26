@@ -300,6 +300,14 @@ def get_time():
     return {"epoch": time.time()}
 
 
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Clears all in-memory events and incidents. Useful between demo runs."""
+    EVENTS_DB.clear()
+    INCIDENTS_DB.clear()
+    return {"message": "System state reset.", "events": 0, "incidents": 0}
+
+
 @app.get("/metrics", tags=["System"])
 def get_metrics():
     """System metrics overview."""
