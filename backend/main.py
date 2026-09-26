@@ -5,6 +5,7 @@ Provides endpoints for event ingestion, threat correlation, incident dispatch, a
 
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,20 @@ ZONES_DB: Dict[str, Dict[str, Any]] = {}
 EVENTS_DB: List[Event] = []
 INCIDENTS_DB: Dict[str, Incident] = {}
 
+# Storage configuration & mode detection (SQLite / in-memory fallback)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+STORAGE_MODE = "SQLite" if DATABASE_URL.startswith("sqlite") or os.getenv("STORAGE_MODE", "").lower() == "sqlite" else "in-memory"
+logger = logging.getLogger("uvicorn.info")
+
+
+@app.on_event("startup")
+async def startup_event():
+    startup_msg = f"[STORAGE CONFIG] Active storage fallback mode: {STORAGE_MODE}"
+    print(f"\n==================================================================", flush=True)
+    print(f"  {startup_msg}", flush=True)
+    print(f"==================================================================\n", flush=True)
+    logger.info(startup_msg)
+
 # Locate and load data/zones.json
 BASE_DIR = Path(__file__).resolve().parent.parent
 ZONES_FILE = BASE_DIR / "data" / "zones.json"
@@ -137,6 +152,10 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
             correlated_events.append(ev)
 
     distinct_sources = sorted(list({ev.source_type for ev in correlated_events}))
+    num_sources = len(distinct_sources)
+
+    # 3. Zone criticality factor.
+    load_zones()
     zone_info = ZONES_DB.get(new_event.zone_id, {})
 
     # Use ScoringEngine to compute contextual score, breakdown, factors, explanation & recommendations
@@ -146,8 +165,14 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
 
     severity = calculate_incident_severity(final_score)
 
-    # Suppress single-source low-risk noise events (must have score >= Medium or multiple sources)
-    if severity == "Low" and len(distinct_sources) < 2:
+    # Exact suppression rule before an incident is created or broadcast:
+    # If the number of distinct source_types contributing is less than 2,
+    # AND the calculated severity is "Low" or "Medium", do NOT create or broadcast
+    # an incident — just store/log the event normally without alerting.
+    # Only genuine multi-source corroboration (2+ distinct source types within
+    # the correlation window) should create a visible incident, UNLESS a single
+    # source's score independently reaches High or Critical severity on its own.
+    if num_sources < 2 and severity in ("Low", "Medium"):
         return None
 
     avg_conf = round(sum(ev.confidence for ev in correlated_events) / len(correlated_events), 4)
@@ -194,6 +219,10 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
             updated_dict["dispatch_ts"] = now_utc.isoformat()
             updated_dict["status"] = "dispatched"
 
+        # Check suppression rule on merged incident as well
+        if len(updated_dict["sources"]) < 2 and updated_dict["severity"] in ("Low", "Medium"):
+            return None
+
         updated_incident = Incident(**updated_dict)
         INCIDENTS_DB[existing_incident.incident_id] = updated_incident
         return updated_incident
@@ -201,53 +230,13 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     new_inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
     timeline = ScoringEngine.build_timeline([], correlated_events, new_inc_id, final_score, severity)
 
-    # 5. Merge into an existing open/dispatched incident in this zone if one
-    #    started within the last few seconds, instead of duplicating alerts.
-    MERGE_WINDOW_SECONDS = 5.0
-    existing_incident = None
-    for inc in INCIDENTS_DB.values():
-        if inc.zone_id != new_event.zone_id:
-            continue
-        if inc.status not in ("open", "dispatched"):
-            continue
-        inc_first_dt = parse_iso(inc.first_ts)
-        if abs((new_event_dt - inc_first_dt).total_seconds()) <= MERGE_WINDOW_SECONDS:
-            existing_incident = inc
-            break
-
-    if existing_incident:
-        merged_event_ids = list(set(existing_incident.event_ids) | set(all_event_ids))
-        updated_score = max(existing_incident.score, final_score)
-        updated_severity = calculate_incident_severity(updated_score)
-        merged_sources = list(set(existing_incident.sources) | set(distinct_sources))
-
-        incident_dict = existing_incident.model_dump()
-        incident_dict["score"] = updated_score
-        incident_dict["severity"] = updated_severity
-        incident_dict["sources"] = merged_sources
-        incident_dict["event_ids"] = merged_event_ids
-        incident_dict["latency_ms"] = latency_ms if latency_ms >= 0 else 0.0
-        if updated_severity in ("Critical", "High") and not incident_dict.get("dispatch_ts"):
-            incident_dict["dispatch_ts"] = now_utc.isoformat()
-            incident_dict["status"] = "dispatched"
-
-        updated_incident = Incident(**incident_dict)
-        INCIDENTS_DB[updated_incident.incident_id] = updated_incident
-        return updated_incident
-
-    # 6. Suppress weak, uncorroborated single-source noise entirely — this
-    #    is what drives your "noise suppression" metric.
-    if num_sources < 2 and severity == "Low":
-        return None
-
-    # 7. Otherwise, create a brand-new incident.
     incident = Incident(
         incident_id=new_inc_id,
         zone_id=new_event.zone_id,
         score=final_score,
         severity=severity,
         sources=distinct_sources,
-        event_ids=all_event_ids,
+        event_ids=[e.event_id for e in correlated_events],
         first_ts=first_event.timestamp,
         dispatch_ts=now_utc.isoformat() if severity in ["Critical", "High"] else None,
         latency_ms=latency_ms if latency_ms >= 0 else 0.0,
@@ -264,6 +253,28 @@ def evaluate_threat_correlation(new_event: Event) -> Optional[Incident]:
     INCIDENTS_DB[incident.incident_id] = incident
     print(f"[backend] Synthesized Incident {incident.incident_id} (score={final_score}, severity={severity}, status={incident.status})", flush=True)
     return incident
+
+
+class CorrelationEngine:
+    """Compatibility wrapper around evaluate_threat_correlation for testing."""
+    def __init__(self, dedup_window_seconds: float = 5.0, cooldown_window_seconds: float = 5.0):
+        self.dedup_window_seconds = dedup_window_seconds
+        self.cooldown_window_seconds = cooldown_window_seconds
+
+    def process_event(self, event_data: Dict[str, Any]) -> Optional[Incident]:
+        ev = Event(**event_data) if isinstance(event_data, dict) else event_data
+        if not any(e.event_id == ev.event_id for e in EVENTS_DB):
+            EVENTS_DB.append(ev)
+        return evaluate_threat_correlation(ev)
+
+    def reset(self):
+        EVENTS_DB.clear()
+        INCIDENTS_DB.clear()
+
+
+engine = CorrelationEngine()
+incident_store = INCIDENTS_DB
+event_store = EVENTS_DB
 
 
 @app.get("/", tags=["System"])
@@ -287,6 +298,14 @@ def get_time():
     """Clock sync endpoint returning current epoch timestamp."""
     import time
     return {"epoch": time.time()}
+
+
+@app.post("/reset", tags=["System"])
+def reset_system_state():
+    """Clears all in-memory events and incidents. Useful between demo runs."""
+    EVENTS_DB.clear()
+    INCIDENTS_DB.clear()
+    return {"message": "System state reset.", "events": 0, "incidents": 0}
 
 
 @app.get("/metrics", tags=["System"])
@@ -331,8 +350,17 @@ async def ingest_event(event: Event):
 
     # Run multi-source threat correlation
     incident = evaluate_threat_correlation(event)
+
+    # Exact suppression rule before an incident is created or broadcast to the WebSocket:
+    # If the number of distinct source_types contributing is less than 2, AND the calculated
+    # severity is "Low" or "Medium", do NOT create or broadcast an incident — just store/log
+    # the event normally without alerting.
     if incident:
-        await manager.broadcast(incident.model_dump())
+        if len(incident.sources) < 2 and incident.severity in ("Low", "Medium"):
+            INCIDENTS_DB.pop(incident.incident_id, None)
+            incident = None
+        else:
+            await manager.broadcast(incident.model_dump())
 
     return {
         "message": "Event ingested and processed successfully.",
