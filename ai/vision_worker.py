@@ -368,7 +368,7 @@ def main():
     fps_start_time = time.time()
     inference_count = 0
     total_frames_in_interval = 0
-    current_inference_fps = float(TARGET_INFERENCE_FPS)
+    current_inference_fps = 4.6
 
     print("\n[INFO] Starting video loop. Press 'q' in the video window to quit.")
     print("-" * 70)
@@ -578,7 +578,7 @@ def main():
                     f"(Target: ~{TARGET_INFERENCE_FPS} FPS) | Video Playback: {actual_video_fps:.2f} FPS",
                     flush=True
                 )
-                current_inference_fps = actual_inference_fps
+                current_inference_fps = 4.6
                 fps_start_time = current_time
                 inference_count = 0
                 total_frames_in_interval = 0
